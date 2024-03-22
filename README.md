@@ -5,8 +5,7 @@
   <img src="./project-image.png" alt="Image description" width="350"/>
 </p>
 
-
-Proposal: using Redis to cache arbitrary blockchain account storage, with support for EVM method calls (eth_call) with payload and data.
+Here's the crazy idea: make Redis able to interpret EVM opcodes, so it can respond to eth_call with minimal SLOAD latency. This is accomplished by creating an EVM interpreter, written in Lua, and embedding it as Redis Functions.
 
 ## Installation
 
