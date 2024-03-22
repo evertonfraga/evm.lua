@@ -1,4 +1,10 @@
-# EVM Redis
+# EVM Lua
+
+
+<p align="center">
+  <img src="./project-image.png" alt="Image description" width="350"/>
+</p>
+
 
 Proposal: using Redis to cache arbitrary blockchain account storage, with support for EVM method calls (eth_call) with payload and data.
 
