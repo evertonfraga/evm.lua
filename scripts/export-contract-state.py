@@ -1,43 +1,33 @@
-import requests
-import time
-import json
+import os
+import redis
+from web3 import Web3
 
-# Ethereum node URL
-ETH_NODE_URL = "http://localhost:8545"
+# Connect to Ethereum node
+eth_node_url = os.environ.get('RPC_HTTP_ENDPOINT')
+web3 = Web3(Web3.HTTPProvider(eth_node_url))
 
-NUM_REQUESTS = 0
+# Connect to Redis
+redis_host = "localhost"
+redis_port = 6379
+r = redis.Redis(host=redis_host, port=redis_port, decode_responses=True)
 
-BLOCKHASH = "0x95b198e154acbfc64109dfd22d8224fe927fd8dfdedfae01587674482ba4baf3" # 18,000,000
+def fetch_and_cache_storage(contract_address, start_block):
+    pointer = None
+    while True:
+        storage = web3.provider.make_request("debug_getStorageRangeAt", [contract_address, start_block, pointer, None])
+        for key, value in storage['result']['storage'].items():
+            # Save to Redis
+            redis_key = f"{contract_address}:S:{key}"
+            r.set(redis_key, value['value'])
 
-def storageRangeAt(blockhash, address, keystart="0x0000000000000000000000000000000000000000000000000000000000000000"):
-    DATA = {
-        "jsonrpc":"2.0",
-        "id":1,
-        "method":"debug_storageRangeAt",
-        "params":[
-            "0xe6a53e859dd14060f41d5ad3d4b9354808689761f4669524fad64f61fea3c18e",
-            0,
-            address,
-            keystart,
-            1000
-        ]
-    }
-    response = requests.post(ETH_NODE_URL, json=DATA)
+        if storage['result']['nextKey'] is None:
+            break
+        pointer = storage['result']['nextKey']
 
+    # Feed a pointer with the respective block number for later use
+    r.set(f"{contract_address}:pointer", start_block)
 
-
-# Start time (in milliseconds)
-start_time = time.time()
-
-next_key = False
-while next_key:
-    storageRangeAt
-
-# End time (in milliseconds)
-end_time = time.time()
-
-# Calculate total runtime
-runtime_ms = (end_time - start_time) * 1000  # Convert to milliseconds
-
-print(f"Total Runtime: {runtime_ms} milliseconds")
-print(f"{NUM_REQUESTS / runtime_ms}")
+# Example usage
+contract_address = "0xYourContractAddressHere"
+start_block = "latest"  # Or specific block number
+fetch_and_cache_storage(contract_address, start_block)
