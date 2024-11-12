@@ -53,5 +53,8 @@ while block_from < block_to:
                 print("\t", redis_key, value)
                 r.set(redis_key, value)
 
+    r.set(f"{contract_address}:pointer", block_from)
+
+print("Finished.")
 exit(0)
 
