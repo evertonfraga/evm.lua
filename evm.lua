@@ -447,7 +447,6 @@ local function memoryPage(table_in)
         print(i, table_in[table_in_size - i + 1], "goes to", page[32 - i + 1])
         page[32 - i + 1] = table_in[table_in_size - i + 1]
     end
-
     return page
 end
 
@@ -458,34 +457,6 @@ local function eth_call(contract)
     EVM.execute(state, bytecode)
     return state.stack[1]
     -- return {state.stack, state.memory, state.storage, state.pc}
-end
-
-local function evm_call(code)
--- "601e600c01"
--- "605f5f5f5f"
--- "66abcdef01abcdef02abcdef03abcdef04abcdef05abcdef06abcdef07abcdef0800"
--- "600456005B61ffff00" -- JUMP
--- "62ffaabb5000" -- POP
--- "60016002600350505000" -- POP
--- "60018000" -- DUP1
--- "6001600260036004600560068000" -- DUP4
--- "600160026003600460059100" -- SWAP3
--- "60006010576001600c5700005B600100" -- JUMPI
--- "60106010146010600514" -- EQ
--- "600960ff12600a600a1200" -- LT
--- "60 10 60 11 61 22 22 62 33 33 33 63 44 44 44 44 00" -- PUSH1
--- "60 00 54 60 01 54 01" -- SLOAD, ADD
--- "60 FF 60 01 52"
--- "60 00 54 60 01 54 01" -- MSTORE
-    --local bytecode_str = "60 00 54 60 01 54 01"
-    local bytecode_str = "600160026003600460059100" -- SWAP3
-
-    -- local bytecode_str = redis.call('GET', contract[1]) 
-    local bytecode = hexStringToTable(bytecode_str)
-    print(bytecode)
-    local state = EVM.init(0x00)
-    EVM.execute(state, code)
-    return state
 end
 
 if redis then
