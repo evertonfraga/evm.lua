@@ -1,5 +1,25 @@
 #!/bin/bash
 
+# Function to ensure Redis is running
+ensure_redis_running() {
+    if ! redis-cli ping > /dev/null 2>&1; then
+        echo "Redis server not running. Starting redis-server..."
+        redis-server --daemonize yes
+        
+        # Wait for Redis to start
+        echo "Waiting for Redis to start..."
+        while ! redis-cli ping > /dev/null 2>&1; do
+            sleep 1
+        done
+        echo "Redis server started successfully."
+    else
+        echo "Redis server is already running."
+    fi
+}
+
+# Ensure Redis is running before proceeding
+ensure_redis_running
+
 cat ../evm.lua | redis-cli -x FUNCTION LOAD REPLACE
 
 # contract=0xd9145CCE52D386f254917e481eB44e9943F39138
@@ -31,5 +51,4 @@ redis-cli SET 0xd9145CCE52D386f254917e481eB44e9943F39138:0x000000000000000000000
 
 redis-cli SET 0xd9145CCE52D386f254917e481eB44e9943F39139 "60 02 60 fa 01"
 
-# redis-cli FCALL eth_call 1 "0xd9145CCE52D386f254917e481eB44e9943F39138"
-
+redis-cli FCALL eth_call 1 "0xd9145CCE52D386f254917e481eB44e9943F39138"
