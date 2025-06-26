@@ -272,7 +272,7 @@ EVM.opcodes = {
         print("JUMP")
         local offset = table.remove(state.stack)
 
-        if bytecode[offset+1] == 0x5B then -- JUMPDEST
+        if bytecode[offset] == 0x5B then -- JUMPDEST
             state.pc = offset+1
         else 
             state.running = false
@@ -292,8 +292,8 @@ EVM.opcodes = {
             print("offset: ", offset)
             -- print("∆∆", offset, h(bytecode[offset+1]))
             
-            if bytecode[offset+1] == 0x5B then -- JUMPDEST
-                state.pc = offset + 4
+            if bytecode[offset] == 0x5B then -- JUMPDEST
+                state.pc = offset + 1
             else 
                 print("Not a jump destination")
                 state.running = false
