@@ -477,7 +477,7 @@ local function eth_call(contract)
     local bytecode = hexStringToTable(bytecode_str)
     local state = EVM.init(contract[1])
     EVM.execute(state, bytecode)
-    return h(state.stack[1])
+    return h(state.stack[#state.stack])
     -- return {state.stack, state.memory, state.storage, state.pc}
 end
 
