@@ -244,7 +244,13 @@ EVM.opcodes = {
     [0x54] = function(state, bytecode)
         local storage_position = table.remove(state.stack)
         local value = redis.call("GET", state.address .. ":" .. storage_position)
-        table.insert(state.stack, value)
+        -- Convert hex string to number
+        if value then
+            local num_value = tonumber(value, 16)
+            table.insert(state.stack, num_value or 0)
+        else
+            table.insert(state.stack, 0)
+        end
         state.pc = state.pc + 1
     end,
 
