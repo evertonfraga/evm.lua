@@ -13,7 +13,7 @@ local EVM = {}
 
 -- Initialize the necessary components for the EVM
 function EVM.init(addr)
-    -- Initialize components like stack, memory, and program counter
+    -- Initialize state attributes
     local evmState = {
         address = addr,
         stack = {},
@@ -22,6 +22,7 @@ function EVM.init(addr)
         pc = 1,  -- Program Counter
         -- to-do: depth = 0,
         -- to-do: calldata = {},
+        -- to-do: gasUsed = 0,
     }
     return evmState
 end
@@ -73,7 +74,6 @@ EVM.opcodes = {
     -- STOP
     [0x00] = function(state)
         -- Implement the STOP logic
-        -- For example, you might set a flag to stop execution
         state.running = false
     end,
 

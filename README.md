@@ -68,3 +68,9 @@ EVM.init should support:
 - new attributes: calldata and depth, starting at 0/1
 for each new CALL opcode-type, instantiate a new EVM.init, passing arguments.
 - RETURN should return data from memory, kill the execution context branch. decrement depth. If depth == top depth, return function to external
+
+
+## Running tests
+
+  cd tests
+  fswatch -o ../ | xargs -n1 -I{} ./test-arithmetic.sh
