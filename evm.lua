@@ -41,8 +41,13 @@ end
 
 local function hexStringToTable(hexString)
     local tbl = {}
-    hexString = hexString:gsub("^0x", "")
-    hexString = hexString:gsub(" ", "")
+
+    if hexString then
+        hexString = hexString:gsub("^0x", "")
+        hexString = hexString:gsub(" ", "")
+    else
+        return ""
+    end
     -- Iterate over the string in steps of 2 characters
     for i = 1, #hexString, 2 do
         local byteString = hexString:sub(i, i+1)
@@ -374,11 +379,11 @@ end
 -- Adds SWAP1..SWAP16
 local function swapN(state, n)
     local count = #state.stack
-    local first = state.stack[count]
+    local top = state.stack[count]
     local other = state.stack[count - n]
 
     state.stack[count] = other
-    state.stack[count - n] = first
+    state.stack[count - n] = top
     state.pc = state.pc + 1
 end
 for i = 1, 16 do
@@ -482,27 +487,13 @@ local function eth_call(contract)
 end
 
 
-
-local function formatStack(stack)
-    if not stack or #stack == 0 then
+local function formatHexArray(arr)
+    if not arr or #arr == 0 then
         return ""
     end
     local hex_values = {}
-    for i = 1, #stack do
-        -- Convert to hex and pad to 2 digits
-        table.insert(hex_values, string.format("%02x", stack[i]))
-    end
-    return table.concat(hex_values, " ")
-end
-
-local function formatMemory(memory)
-    if not memory or #memory == 0 then
-        return ""
-    end
-    local hex_values = {}
-    for i = 1, #memory do
-        -- Convert to hex and pad to 2 digits
-        table.insert(hex_values, string.format("%02x", memory[i]))
+    for i = 1, #arr do
+        table.insert(hex_values, string.format("%02x", arr[i]))
     end
     return table.concat(hex_values, " ")
 end
@@ -515,7 +506,7 @@ local function formatStorage(storage)
     for key, value in pairs(storage) do
         table.insert(storage_lines, tostring(key) .. ": " .. tostring(value))
     end
-    return table.concat(storage_lines, "\n")
+    return table.concat(storage_lines, "\\n")
 end
 
 local function eth_call_debug(contract)
@@ -524,15 +515,17 @@ local function eth_call_debug(contract)
     local state = EVM.init(contract[1])
     EVM.execute(state, bytecode)
     
-    -- Format output according to specified format
-    local output = "PC: " .. tostring(state.pc) .. "\n\n"
-    output = output .. "Stack\n" .. formatStack(state.stack) .. "\n\n"
-    output = output .. "Storage\n" .. formatStorage(state.storage) .. "\n\n"
-    output = output .. "Memory\n" .. formatMemory(state.memory)
+    -- Create JSON output
+    local json_output = string.format(
+        '{"pc": %d, "stack": "%s", "memory": "%s", "storage": "%s"}',
+        state.pc,
+        formatHexArray(state.stack),
+        formatHexArray(state.memory),
+        formatStorage(state.storage)
+    )
     
-    return output
+    return json_output
 end
-
 
 
 if redis then
