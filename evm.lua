@@ -57,7 +57,15 @@ end
 
 local function h(n)
     -- print(n)
-    return string.format("0x%02X", n)
+    if type(n) == "boolean" then
+        return n and "true" or "false"
+    elseif type(n) == "string" then
+        return n
+    elseif type(n) == "number" then
+        return string.format("0x%02X", n)
+    else
+        return tostring(n)
+    end
 end
 
 -- Define opcodes
