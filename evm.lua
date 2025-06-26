@@ -243,7 +243,15 @@ EVM.opcodes = {
     -- SLOAD
     [0x54] = function(state, bytecode)
         local storage_position = table.remove(state.stack)
-        local value = redis.call("GET", state.address .. ":" .. storage_position)
+
+        -- Convert to uppercase hex with padding if needed
+        local hex_position = string.format("%X", storage_position)
+        -- Ensure even length by padding with 0 if necessary
+        if #hex_position % 2 == 1 then
+            hex_position = "0" .. hex_position
+        end
+
+        local value = redis.call("GET", state.address .. ":" .. hex_position)
         -- Convert hex string to number
         if value then
             local num_value = tonumber(value, 16)
