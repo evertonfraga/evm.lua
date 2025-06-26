@@ -1,6 +1,36 @@
 #!/bin/bash
 
-# Function to ensure Redis is running
+# ANSI color codes
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Convert hex to decimal, removing 0x prefix
+hex_to_dec() {
+    local hex_val="${1#0x}"  # Remove 0x prefix
+    printf "%d" "0x$hex_val"  # Convert to decimal
+}
+
+# Success logging function
+success() {
+    local message="$1"
+    echo -e "${GREEN}✓ $message${NC}"
+}
+
+# Failure logging function
+fail() {
+    local message="$1"
+    local expected="$2"
+    local actual="$3"
+    echo -e "${RED}✗ $message${NC}"
+    if [ -n "$expected" ] && [ -n "$actual" ]; then
+        echo -e "${YELLOW}  Expected: $expected${NC}"
+        echo -e "${YELLOW}  Got:      $actual${NC}"
+    fi
+}
+
+# Ensure Redis is running
 ensure_redis_running() {
     if ! redis-cli ping > /dev/null 2>&1; then
         echo "Redis server not running. Starting redis-server..."
@@ -17,38 +47,7 @@ ensure_redis_running() {
     fi
 }
 
-# Ensure Redis is running before proceeding
-ensure_redis_running
-
-cat ../evm.lua | redis-cli -x FUNCTION LOAD REPLACE
-
-# contract=0xd9145CCE52D386f254917e481eB44e9943F39138
-# code={0x61, 0x02, 0xfa, 0x00}
-
-
-# """
-# 0x60026040015f5260206000f3
-# PUSH1 0x02
-# PUSH1 0x40
-# ADD
-# PUSH0
-# MSTORE
-# PUSH1 0x20
-# PUSH1 0x00
-# RETURN
-# """
-
-# """
-# 0x601e600c01
-# PUSH1 0x1e
-# PUSH1 0x0c
-# ADD
-# """
-
-# redis-cli SET 0xd9145CCE52D386f254917e481eB44e9943F39138 "60 00 54 60 01 54 01"
-# redis-cli SET 0xd9145CCE52D386f254917e481eB44e9943F39138:0x0000000000000000000000000000000000000000000000000000000000000000 0x000000000000000000000000000000000000000000000000000000000000001e
-# redis-cli SET 0xd9145CCE52D386f254917e481eB44e9943F39138:0x0000000000000000000000000000000000000000000000000000000000000001 0x000000000000000000000000000000000000000000000000000000000000000c
-
-# redis-cli SET 0xd9145CCE52D386f254917e481eB44e9943F39139 "60 02 60 fa 01"
-
-# redis-cli FCALL eth_call 1 "0xd9145CCE52D386f254917e481eB44e9943F39139"
+# Load EVM function
+load_evm_function() {
+    cat ../evm.lua | redis-cli -x FUNCTION LOAD REPLACE
+}

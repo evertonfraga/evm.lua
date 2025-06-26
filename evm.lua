@@ -469,12 +469,67 @@ local function eth_call(contract)
     local bytecode = hexStringToTable(bytecode_str)
     local state = EVM.init(contract[1])
     EVM.execute(state, bytecode)
-    return state.stack[1]
+    return h(state.stack[1])
     -- return {state.stack, state.memory, state.storage, state.pc}
 end
 
+
+
+local function formatStack(stack)
+    if not stack or #stack == 0 then
+        return ""
+    end
+    local hex_values = {}
+    for i = 1, #stack do
+        -- Convert to hex and pad to 2 digits
+        table.insert(hex_values, string.format("%02x", stack[i]))
+    end
+    return table.concat(hex_values, " ")
+end
+
+local function formatMemory(memory)
+    if not memory or #memory == 0 then
+        return ""
+    end
+    local hex_values = {}
+    for i = 1, #memory do
+        -- Convert to hex and pad to 2 digits
+        table.insert(hex_values, string.format("%02x", memory[i]))
+    end
+    return table.concat(hex_values, " ")
+end
+
+local function formatStorage(storage)
+    if not storage then
+        return ""
+    end
+    local storage_lines = {}
+    for key, value in pairs(storage) do
+        table.insert(storage_lines, tostring(key) .. ": " .. tostring(value))
+    end
+    return table.concat(storage_lines, "\n")
+end
+
+local function eth_call_debug(contract)
+    local bytecode_str = redis.call('GET', contract[1]) 
+    local bytecode = hexStringToTable(bytecode_str)
+    local state = EVM.init(contract[1])
+    EVM.execute(state, bytecode)
+    
+    -- Format output according to specified format
+    local output = "PC: " .. tostring(state.pc) .. "\n\n"
+    output = output .. "Stack\n" .. formatStack(state.stack) .. "\n\n"
+    output = output .. "Storage\n" .. formatStorage(state.storage) .. "\n\n"
+    output = output .. "Memory\n" .. formatMemory(state.memory)
+    
+    return output
+end
+
+
+
 if redis then
     redis.register_function('eth_call', eth_call)
+    redis.register_function('eth_call_debug', eth_call_debug)
 end
 
 -- eth_call()

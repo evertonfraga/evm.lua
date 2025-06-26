@@ -3,6 +3,30 @@
 # Source library functions
 source ./lib.sh
 
+# Function to parse debug output
+parse_debug_output() {
+    local debug_output="$1"
+    
+    # Extract PC value
+    local pc=$(echo "$debug_output" | grep "^PC:" | cut -d' ' -f2)
+    
+    # Extract Stack section (line after "Stack" header until next empty line)
+    local stack=$(echo "$debug_output" | awk '/^Stack$/{getline; print; exit}')
+    
+    # Extract Storage section (lines after "Storage" header until next empty line)
+    local storage=$(echo "$debug_output" | awk '/^Storage$/,/^$/ {if(!/^Storage$/ && !/^$/) print}')
+    
+    # Extract Memory section (line after "Memory" header)
+    local memory=$(echo "$debug_output" | awk '/^Memory$/{getline; print; exit}')
+
+    # Print debug information
+    echo "Program Counter: $pc"
+    echo "Stack: $stack"
+    echo "Storage:"
+    echo "$storage"
+    echo "Memory: $memory"
+}
+
 # Test ADD opcode (0x01)
 test_add() {
     local contract_addr="0x0000000000000000000000000000000000000001"
@@ -11,11 +35,13 @@ test_add() {
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
-    if [ "$result" = "30" ]; then
-        echo "✓ ADD Test Passed: 10 + 20 = 30"
+    # parse_debug_output "$result"
+
+    if [ "$result" = "0x1E" ]; then
+        success "ADD Test Passed: 10 + 20 = 30 (0x1E)"
         return 0
     else
-        echo "✗ ADD Test Failed. Expected 30, Got $result"
+        fail "ADD Test Failed" "0x1E" "$result"
         return 1
     fi
 }
@@ -23,16 +49,16 @@ test_add() {
 # Test SUB opcode (0x03)
 test_sub() {
     local contract_addr="0x0000000000000000000000000000000000000003"
-    # Bytecode: PUSH1 25, PUSH1 10, SUB, STOP
+    # Bytecode: PUSH1 10, PUSH1 25, SUB, STOP
     redis-cli SET "$contract_addr" "60 0A 60 19 03 00"
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
-    
-    if [ "$result" = "10" ]; then
-        echo "✓ SUB Test Passed: 25 - 10 = 15"
+
+    if [ "$result" = "0x0F" ]; then
+        success "SUB Test Passed: 25 - 10 = 15 (0x0F)"
         return 0
     else
-        echo "✗ SUB Test Failed. Expected 15, Got $result"
+        fail "SUB Test Failed" "0x0A" "$result"
         return 1
     fi
 }
@@ -45,11 +71,11 @@ test_mul() {
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
-    if [ "$result" = "42" ]; then
-        echo "✓ MUL Test Passed: 6 * 7 = 42"
+    if [ "$result" = "0x2A" ]; then
+        success "MUL Test Passed: 6 * 7 = 42 ($result)"
         return 0
     else
-        echo "✗ MUL Test Failed. Expected 42, Got $result"
+        fail "MUL Test Failed" "0x2A" "$result"
         return 1
     fi
 }
@@ -57,16 +83,16 @@ test_mul() {
 # Test DIV opcode (0x04)
 test_div() {
     local contract_addr="0x0000000000000000000000000000000000000004"
-    # Bytecode: PUSH1 20, PUSH1 5, DIV, STOP
-    redis-cli SET "$contract_addr" "60 14 60 05 04 00"
+    # Bytecode: PUSH1 5, PUSH1 20, DIV, STOP
+    redis-cli SET "$contract_addr" "60 05 60 14 04 00"
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
-    
-    if [ "$result" = "4" ]; then
-        echo "✓ DIV Test Passed: 20 / 5 = 4"
+
+    if [ "$result" = "0x04" ]; then
+        success "DIV Test Passed: 20 / 5 = 4 ($result)"
         return 0
     else
-        echo "✗ DIV Test Failed. Expected 4, Got $result"
+        fail "DIV Test Failed" "0x04" "$result"
         return 1
     fi
 }
@@ -74,22 +100,24 @@ test_div() {
 # Test SDIV opcode (0x05)
 test_sdiv() {
     local contract_addr="0x0000000000000000000000000000000000000005"
-    # Bytecode: PUSH1 20, PUSH1 5, SDIV, STOP
-    redis-cli SET "$contract_addr" "60 14 60 05 05 00"
+    # Bytecode: PUSH1 5, PUSH1 20, SDIV, STOP
+    redis-cli SET "$contract_addr" "60 05 60 14 05 00"
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
-    
-    if [ "$result" = "4" ]; then
-        echo "✓ SDIV Test Passed: 20 / 5 = 4"
+
+    if [ "$result" = "0x04" ]; then
+        success "SDIV Test Passed: 20 / 5 = 4 ($result)"
         return 0
     else
-        echo "✗ SDIV Test Failed. Expected 4, Got $result"
+        fail "SDIV Test Failed" "0x04" "$result"
         return 1
     fi
 }
 
 # Main test runner
 main() {
+    ensure_redis_running
+    load_evm_function
 
     local total_tests=5
     local passed_tests=0
@@ -103,10 +131,10 @@ main() {
     echo "Test Results: $passed_tests/$total_tests tests passed"
 
     if [ $passed_tests -eq $total_tests ]; then
-        echo "✓ All Arithmetic Opcode Tests Passed!"
+        success "All Arithmetic Opcode Tests Passed!"
         exit 0
     else
-        echo "✗ Some Arithmetic Opcode Tests Failed"
+        fail "Some Arithmetic Opcode Tests Failed"
         exit 1
     fi
 }
