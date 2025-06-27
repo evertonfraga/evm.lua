@@ -61,8 +61,15 @@ local function hexStringToTable(hexString)
     return tbl
 end
 
+local function lshift(x, n)
+    return x * (2 ^ n)
+end
+
+local function rshift(x, n)
+    return math.floor(x / (2 ^ n))
+end
+
 local function h(n)
-    -- print(n)
     if type(n) == "boolean" then
         return n and "true" or "false"
     elseif type(n) == "string" then
@@ -331,16 +338,6 @@ EVM.opcodes = {
     --     state.pc = state.pc + 1
     -- end,
 }
-
-
-local function lshift(x, n)
-    return x * (2 ^ n)
-end
-
-local function rshift(x, n)
-    return math.floor(x / (2 ^ n))
-end
-
 
 -- Adds PUSH1 to PUSH7 opcodes
 -- TODO: implement PUSH8 til 32. integer overflow

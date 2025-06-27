@@ -78,7 +78,7 @@ main() {
     declare -a test_suites=(
         "test-arithmetic.sh:Arithmetic Operations"
         "test-comparison.sh:Comparison Operations"
-        "test-stack-memory.sh:Stack and Memory Operations"
+        "test-stack.sh:Stack and Memory Operations"
         "test-control-flow.sh:Control Flow Operations"
         "test-storage.sh:Storage Operations"
     )
