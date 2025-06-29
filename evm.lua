@@ -69,13 +69,56 @@ local function rshift(x, n)
     return math.floor(x / (2 ^ n))
 end
 
+-- Helper function to convert stack values to numbers
+local function toNumber(val)
+    if type(val) == "number" then
+        return val
+    elseif type(val) == "string" and val:match("^0x[0-9A-Fa-f]+$") then
+        -- For very large hex strings, we'll need to handle overflow
+        local hex_part = val:sub(3) -- Remove "0x"
+        if #hex_part <= 14 then -- Safe for Lua numbers (up to 7 bytes)
+            return tonumber(val, 16) or 0
+        else
+            -- For larger values, return a truncated version or handle specially
+            -- This is a limitation of Lua's number precision
+            return tonumber("0x" .. hex_part:sub(-14), 16) or 0
+        end
+    else
+        return tonumber(val) or 0
+    end
+end
+
 local function h(n)
-    if type(n) == "boolean" then
+    if n == nil then
+        return "0x00"
+    elseif type(n) == "boolean" then
         return n and "true" or "false"
     elseif type(n) == "string" then
-        return n
+        -- If it's already a hex string, format it properly
+        if n:match("^0x[0-9A-Fa-f]+$") then
+            local hex_part = n:sub(3):upper()
+            -- For values that should be simplified (like 0x0000...0042 -> 0x42)
+            if #hex_part > 2 then
+                local simplified = hex_part:gsub("^0+", "")
+                if simplified == "" then
+                    return "0x00"
+                elseif #simplified == 1 then
+                    return "0x0" .. simplified
+                else
+                    return "0x" .. simplified
+                end
+            else
+                return "0x" .. hex_part
+            end
+        else
+            return n
+        end
     elseif type(n) == "number" then
-        return string.format("0x%02X", n)
+        if n < 256 then
+            return string.format("0x%02X", n)
+        else
+            return string.format("0x%X", n)
+        end
     else
         return tostring(n)
     end
@@ -91,32 +134,32 @@ EVM.opcodes = {
 
     -- ADD
     [0x01] = function(state)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         table.insert(state.stack, a + b)
         state.pc = state.pc + 1
     end,
 
     -- MUL
     [0x02] = function(state)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         table.insert(state.stack, a * b)
         state.pc = state.pc + 1
     end,
 
     -- SUB
     [0x03] = function(state)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         table.insert(state.stack, a - b)
         state.pc = state.pc + 1
     end,
 
     -- DIV
     [0x04] = function(state)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         local result = 0
         if b == 0 then
             result = 0
@@ -129,8 +172,8 @@ EVM.opcodes = {
 
     -- SDIV
     [0x05] = function(state)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         local result
         if b == 0 then
             result = 0
@@ -148,8 +191,8 @@ EVM.opcodes = {
 
     -- LT
     [0x10] = function(state, bytecode)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         
         if a > b then
             table.insert(state.stack, 1)
@@ -162,8 +205,8 @@ EVM.opcodes = {
 
     -- GT
     [0x11] = function(state, bytecode)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         
         if a < b then
             table.insert(state.stack, 1)
@@ -177,8 +220,8 @@ EVM.opcodes = {
 
     -- SLT
     [0x12] = function(state, bytecode)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         
         if a > b then
             table.insert(state.stack, 1)
@@ -191,8 +234,8 @@ EVM.opcodes = {
 
     -- SGT
     [0x13] = function(state, bytecode)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         
         if a < b then
             table.insert(state.stack, 1)
@@ -205,8 +248,8 @@ EVM.opcodes = {
 
     -- EQ
     [0x14] = function(state, bytecode)
-        local a = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
         
         if a == b then
             table.insert(state.stack, 1)
@@ -219,7 +262,7 @@ EVM.opcodes = {
 
     -- ISZERO
     [0x15] = function(state, bytecode)
-        local a = table.remove(state.stack)
+        local a = toNumber(table.remove(state.stack))
         
         if a == 0 then
             table.insert(state.stack, 1)
@@ -254,7 +297,7 @@ EVM.opcodes = {
 
     -- SLOAD
     [0x54] = function(state, bytecode)
-        local storage_position = table.remove(state.stack)
+        local storage_position = toNumber(table.remove(state.stack))
 
         -- Convert to uppercase hex with padding if needed
         local hex_position = string.format("%X", storage_position)
@@ -277,7 +320,7 @@ EVM.opcodes = {
     -- JUMP
     [0x56] = function(state, bytecode)
         print("JUMP")
-        local offset = table.remove(state.stack)
+        local offset = toNumber(table.remove(state.stack))
 
         if bytecode[offset] == 0x5B then -- JUMPDEST
             state.pc = offset+1
@@ -290,8 +333,8 @@ EVM.opcodes = {
     -- JUMPI
     [0x57] = function(state, bytecode)
         print("JUMPI")
-        local offset = table.remove(state.stack)
-        local b = table.remove(state.stack)
+        local offset = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
 
         if b == 0 then
             state.pc = state.pc + 1
@@ -339,22 +382,30 @@ EVM.opcodes = {
     -- end,
 }
 
--- Adds PUSH1 to PUSH7 opcodes
--- TODO: implement PUSH8 til 32. integer overflow
+-- Adds PUSH1 to PUSH32 opcodes
 local function pushN(state, bytecode, numBytes)
-    local bytes = 0
+    local hex_string = ""
     state.pc = state.pc + 1
+    
+    -- Collect bytes as hex string
     for i = 1, numBytes do
-        bytes = bytes + bytecode[state.pc]
-        bytes = lshift(bytes, 8)
+        local byte_val = bytecode[state.pc] or 0
+        hex_string = hex_string .. string.format("%02X", byte_val)
         state.pc = state.pc + 1
     end
-    bytes = rshift(bytes, 8)
-    table.insert(state.stack, bytes)
+    
+    -- For small values (up to 7 bytes), convert to number
+    -- For larger values, store as hex string to preserve precision
+    if numBytes <= 7 then
+        local value = tonumber(hex_string, 16) or 0
+        table.insert(state.stack, value)
+    else
+        -- Store as hex string for large values
+        table.insert(state.stack, "0x" .. hex_string)
+    end
 end
-for i = 1, 7 do
+for i = 1, 32 do
     local opcode = 0x5F + i  -- Calculating the opcode (0x60 is PUSH1)
-    -- print("==============", h(opcode))
     EVM.opcodes[opcode] = function(state, bytecode)
         pushN(state, bytecode, i)
     end
