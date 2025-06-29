@@ -220,6 +220,20 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- MOD
+    [0x06] = function(state)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
+        local result = 0
+        if b == 0 then
+            result = 0
+        else 
+            result = a % b
+        end
+        table.insert(state.stack, result)
+        state.pc = state.pc + 1
+    end,
+
     -- LT
     [0x10] = function(state, bytecode)
         local a = toNumber(table.remove(state.stack))
@@ -365,6 +379,39 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- MLOAD
+    [0x51] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local value = 0
+        -- Load 32 bytes from memory
+        for i = 0, 31 do
+            local byte_val = state.memory[offset + i] or 0
+            value = value + (byte_val * (256 ^ (31 - i)))
+        end
+        table.insert(state.stack, value)
+        state.pc = state.pc + 1
+    end,
+
+    -- MSTORE
+    [0x52] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local value = toNumber(table.remove(state.stack))
+        -- Store 32 bytes to memory
+        for i = 0, 31 do
+            local byte_val = math.floor(value / (256 ^ (31 - i))) % 256
+            state.memory[offset + i] = byte_val
+        end
+        state.pc = state.pc + 1
+    end,
+
+    -- MSTORE8
+    [0x53] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local value = toNumber(table.remove(state.stack))
+        state.memory[offset] = value % 256
+        state.pc = state.pc + 1
+    end,
+
     -- SLOAD
     [0x54] = function(state, bytecode)
         local storage_position = toNumber(table.remove(state.stack))
@@ -444,12 +491,14 @@ EVM.opcodes = {
     -- SWAP1..SWAP16 are added dynamically.
     -- 0x90..0x9F
 
-    -- example:
-    -- -- POP
-    -- [0x50] = function(state, bytecode)
-    --     local a = table.remove(state.stack)
-    --     state.pc = state.pc + 1
-    -- end,
+    -- INVALID (0xFE) - designated invalid opcode per EIP-141
+    [0xFE] = function(state)
+        -- Designated invalid instruction - abort execution
+        state.running = false
+        state.invalid_opcode = true
+        error("INVALID opcode encountered")
+    end,
+
 }
 
 -- Adds PUSH1 to PUSH32 opcodes
