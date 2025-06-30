@@ -1,9 +1,5 @@
 #!lua name=EVM
 
--- if _G then
---     print("GLOBAL _TEST FOUND")
--- end
-
 local function print(v)
     -- NOOP, as redis can't print
 end
@@ -20,14 +16,9 @@ function EVM.init(addr)
         memory = {},
         storage = {},
         pc = 1,  -- Program Counter
-        -- to-do: depth = 0,
-        -- to-do: calldata = {},
-        -- to-do: gasUsed = 0,
     }
     return evmState
 end
-
--- Workarounds to Lua stdlib methods that are not available on redis
 
 -- Define a simple pairs function
 local function tpairs(t)
@@ -61,26 +52,15 @@ local function hexStringToTable(hexString)
     return tbl
 end
 
-local function lshift(x, n)
-    return x * (2 ^ n)
-end
-
-local function rshift(x, n)
-    return math.floor(x / (2 ^ n))
-end
-
 -- Helper function to convert stack values to numbers
 local function toNumber(val)
     if type(val) == "number" then
         return val
     elseif type(val) == "string" and val:match("^0x[0-9A-Fa-f]+$") then
-        -- For very large hex strings, we'll need to handle overflow
-        local hex_part = val:sub(3) -- Remove "0x"
-        if #hex_part <= 14 then -- Safe for Lua numbers (up to 7 bytes)
+        local hex_part = val:sub(3)
+        if #hex_part <= 14 then
             return tonumber(val, 16) or 0
         else
-            -- For larger values, return a truncated version or handle specially
-            -- This is a limitation of Lua's number precision
             return tonumber("0x" .. hex_part:sub(-14), 16) or 0
         end
     else
@@ -95,10 +75,8 @@ local function h(n)
     elseif type(n) == "boolean" then
         return n and "true" or "false"
     elseif type(n) == "string" then
-        -- If it's already a hex string, format it properly
         if n:match("^0x[0-9A-Fa-f]+$") then
             local hex_part = n:sub(3):upper()
-            -- For values that should be simplified (like 0x0000...0042 -> 0x42)
             if #hex_part > 2 then
                 local simplified = hex_part:gsub("^0+", "")
                 if simplified == "" then
@@ -125,42 +103,253 @@ local function h(n)
     end
 end
 
--- Simplified Keccak256 implementation for EVM
+-- 64-bit arithmetic using 32-bit chunks for better precision
+local function split64(n)
+    local high = math.floor(n / 4294967296) % 4294967296
+    local low = n % 4294967296
+    return high, low
+end
+
+local function join64(high, low)
+    return (high * 4294967296 + low) % (2^53)
+end
+
+local function band64(a, b)
+    local ah, al = split64(a)
+    local bh, bl = split64(b)
+    
+    local function band32(x, y)
+        local result = 0
+        local bit = 1
+        for i = 1, 32 do
+            if (math.floor(x / bit) % 2 == 1) and (math.floor(y / bit) % 2 == 1) then
+                result = result + bit
+            end
+            bit = bit * 2
+            if bit > x and bit > y then break end
+        end
+        return result
+    end
+    
+    return join64(band32(ah, bh), band32(al, bl))
+end
+
+local function bxor64(a, b)
+    local ah, al = split64(a)
+    local bh, bl = split64(b)
+    
+    local function bxor32(x, y)
+        local result = 0
+        local bit = 1
+        for i = 1, 32 do
+            if (math.floor(x / bit) % 2) ~= (math.floor(y / bit) % 2) then
+                result = result + bit
+            end
+            bit = bit * 2
+            if bit > x and bit > y then break end
+        end
+        return result
+    end
+    
+    return join64(bxor32(ah, bh), bxor32(al, bl))
+end
+
+local function bnot64(a)
+    return bxor64(a, 0x1FFFFFFFFFFFFF)
+end
+
+local function lrotate64(value, amount)
+    if amount == 0 then return value end
+    amount = amount % 64
+    
+    local high, low = split64(value)
+    
+    if amount == 32 then
+        return join64(low, high)
+    elseif amount < 32 then
+        local new_high = ((high * (2^amount)) % 4294967296) + math.floor(low / (2^(32-amount)))
+        local new_low = ((low * (2^amount)) % 4294967296) + math.floor(high / (2^(32-amount)))
+        return join64(new_high % 4294967296, new_low % 4294967296)
+    else
+        amount = amount - 32
+        local new_high = ((low * (2^amount)) % 4294967296) + math.floor(high / (2^(32-amount)))
+        local new_low = ((high * (2^amount)) % 4294967296) + math.floor(low / (2^(32-amount)))
+        return join64(new_high % 4294967296, new_low % 4294967296)
+    end
+end
+
+-- Keccak implamentation ported from: https://github.com/paulmillr/noble-hashes/
+-- Keccak256 constants
+local SHA3_PI = {2,6,12,18,24,3,9,10,16,22,1,7,13,19,20,4,5,11,17,23,8,14,15,21,2}
+local SHA3_ROTL = {1,3,6,10,15,21,28,36,45,55,2,14,27,41,56,8,25,43,62,18,39,61,20,44}
+local SHA3_IOTA_H = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0}
+local SHA3_IOTA_L = {1,130,32898,32906,2147516416,2147483649,32777,138,136,2147516425,2147483658,2147516555,139,32905,32771,32770,128,32778,2147483658,2147516545,32896,2147483649,2147516424,2147516555}
+
+local function rotl32(n, b)
+    n = n % 0x100000000
+    return ((n << b) | (n >> (32 - b))) % 0x100000000
+end
+
+local function rotlH(h, l, s)
+    if s > 32 then
+        return rotl32(l, s - 32) ~ rotl32(h, s - 32)
+    else
+        return rotl32(h, s) ~ (l >> (32 - s))
+    end
+end
+
+local function rotlL(h, l, s)
+    if s > 32 then
+        return rotl32(h, s - 32) ~ rotl32(l, s - 32)
+    else
+        return rotl32(l, s) ~ (h >> (32 - s))
+    end
+end
+
+local function keccakP(s)
+    local B = {}
+    for i = 1, 10 do B[i] = 0 end
+    
+    for round = 0, 23 do
+        -- Theta
+        for x = 0, 4 do
+            B[x * 2 + 1] = s[x * 2 + 1] ~ s[x * 2 + 11] ~ s[x * 2 + 21] ~ s[x * 2 + 31] ~ s[x * 2 + 41]
+            B[x * 2 + 2] = s[x * 2 + 2] ~ s[x * 2 + 12] ~ s[x * 2 + 22] ~ s[x * 2 + 32] ~ s[x * 2 + 42]
+        end
+        
+        for x = 0, 4 do
+            local idx1 = ((x + 4) % 5) * 2
+            local idx0 = ((x + 1) % 5) * 2
+            local B0 = B[idx0 + 1]
+            local B1 = B[idx0 + 2]
+            local Th = rotlH(B0, B1, 1) ~ B[idx1 + 1]
+            local Tl = rotlL(B0, B1, 1) ~ B[idx1 + 2]
+            
+            for y = 0, 4 do
+                s[x * 2 + y * 10 + 1] = s[x * 2 + y * 10 + 1] ~ Th
+                s[x * 2 + y * 10 + 2] = s[x * 2 + y * 10 + 2] ~ Tl
+            end
+        end
+        
+        -- Rho and Pi
+        local curH = s[3]
+        local curL = s[4]
+        
+        for t = 0, 23 do
+            local shift = SHA3_ROTL[t + 1]
+            local Th = rotlH(curH, curL, shift)
+            local Tl = rotlL(curH, curL, shift)
+            local PI = SHA3_PI[t + 1]
+            curH = s[PI + 1]
+            curL = s[PI + 2]
+            s[PI + 1] = Th
+            s[PI + 2] = Tl
+        end
+        
+        -- Chi
+        for y = 0, 4 do
+            for x = 0, 4 do
+                B[x * 2 + 1] = s[y * 10 + x * 2 + 1]
+                B[x * 2 + 2] = s[y * 10 + x * 2 + 2]
+            end
+            for x = 0, 4 do
+                s[y * 10 + x * 2 + 1] = s[y * 10 + x * 2 + 1] ~ ((~B[((x + 1) % 5) * 2 + 1]) & B[((x + 2) % 5) * 2 + 1])
+                s[y * 10 + x * 2 + 2] = s[y * 10 + x * 2 + 2] ~ ((~B[((x + 1) % 5) * 2 + 2]) & B[((x + 2) % 5) * 2 + 2])
+            end
+        end
+        
+        -- Iota
+        s[1] = s[1] ~ SHA3_IOTA_H[round + 1]
+        s[2] = s[2] ~ SHA3_IOTA_L[round + 1]
+    end
+end
+
 local function keccak256(data)
-    -- Convert data to string for hashing
-    local input = ""
-    for i = 1, #data do
-        input = input .. string.char(data[i])
+    local state32 = {}
+    for i = 1, 50 do state32[i] = 0 end
+    
+    local state = {}
+    for i = 1, 200 do state[i] = 0 end
+    
+    local blockLen = 136
+    local pos = 0
+    
+    -- Absorb
+    local bytes = type(data) == "string" and {data:byte(1, #data)} or data
+    local len = #bytes
+    local dataPos = 0
+    
+    while dataPos < len do
+        local take = math.min(blockLen - pos, len - dataPos)
+        for i = 0, take - 1 do
+            state[pos + i + 1] = state[pos + i + 1] ~ bytes[dataPos + i + 1]
+        end
+        pos = pos + take
+        dataPos = dataPos + take
+        
+        if pos == blockLen then
+            -- Convert to 32-bit words
+            for i = 0, 49 do
+                local byte_idx = i * 4
+                state32[i + 1] = state[byte_idx + 1] | 
+                               (state[byte_idx + 2] << 8) |
+                               (state[byte_idx + 3] << 16) |
+                               (state[byte_idx + 4] << 24)
+            end
+            
+            keccakP(state32)
+            
+            -- Convert back to bytes
+            for i = 0, 49 do
+                local word = state32[i + 1]
+                local byte_idx = i * 4
+                state[byte_idx + 1] = word & 0xFF
+                state[byte_idx + 2] = (word >> 8) & 0xFF
+                state[byte_idx + 3] = (word >> 16) & 0xFF
+                state[byte_idx + 4] = (word >> 24) & 0xFF
+            end
+            
+            pos = 0
+        end
     end
     
-    -- Simple hash function using basic operations
-    local hash = 0x811c9dc5 -- FNV offset basis
-    for i = 1, #input do
-        -- XOR operation using math
-        local byte_val = string.byte(input, i)
-        hash = ((hash + byte_val) % (2^32)) -- Simple mixing instead of XOR
-        hash = (hash * 0x01000193) % (2^32) -- FNV prime
+    -- Padding
+    state[pos + 1] = state[pos + 1] ~ 0x01
+    state[blockLen] = state[blockLen] ~ 0x80
+    
+    -- Final permutation
+    for i = 0, 49 do
+        local byte_idx = i * 4
+        state32[i + 1] = state[byte_idx + 1] | 
+                       (state[byte_idx + 2] << 8) |
+                       (state[byte_idx + 3] << 16) |
+                       (state[byte_idx + 4] << 24)
     end
     
-    -- Create deterministic but different hash based on input
-    local hash2 = hash
-    for i = 1, #input do
-        hash2 = (hash2 + string.byte(input, i) * i) % (2^32)
+    keccakP(state32)
+    
+    for i = 0, 49 do
+        local word = state32[i + 1]
+        local byte_idx = i * 4
+        state[byte_idx + 1] = word & 0xFF
+        state[byte_idx + 2] = (word >> 8) & 0xFF
+        state[byte_idx + 3] = (word >> 16) & 0xFF
+        state[byte_idx + 4] = (word >> 24) & 0xFF
     end
     
-    -- Extend to 256 bits by combining hash values
-    local hash_str = string.format("%08X%08X%08X%08X%08X%08X%08X%08X", 
-                                   hash, hash2, hash + 1, hash2 + 1,
-                                   hash + 2, hash2 + 2, hash + 3, hash2 + 3)
+    -- Extract 32 bytes
+    local result = "0x"
+    for i = 1, 32 do
+        result = result .. string.format("%02X", state[i])
+    end
     
-    return "0x" .. hash_str
+    return result
 end
 
 -- Define opcodes
 EVM.opcodes = {
     -- STOP
     [0x00] = function(state)
-        -- Implement the STOP logic
         state.running = false
     end,
 
@@ -322,18 +511,7 @@ EVM.opcodes = {
     [0x16] = function(state)
         local a = toNumber(table.remove(state.stack))
         local b = toNumber(table.remove(state.stack))
-        -- Implement bitwise AND using mathematical operations
-        local result = 0
-        local bit = 1
-        while a > 0 or b > 0 do
-            if (a % 2 == 1) and (b % 2 == 1) then
-                result = result + bit
-            end
-            a = math.floor(a / 2)
-            b = math.floor(b / 2)
-            bit = bit * 2
-        end
-        table.insert(state.stack, result)
+        table.insert(state.stack, band64(a, b))
         state.pc = state.pc + 1
     end,
 
@@ -341,7 +519,6 @@ EVM.opcodes = {
     [0x17] = function(state)
         local a = toNumber(table.remove(state.stack))
         local b = toNumber(table.remove(state.stack))
-        -- Implement bitwise OR using mathematical operations
         local result = 0
         local bit = 1
         while a > 0 or b > 0 do
@@ -361,13 +538,23 @@ EVM.opcodes = {
         local offset = toNumber(table.remove(state.stack))
         local length = toNumber(table.remove(state.stack))
         
+        local data = {}
+        for i = 1, length do
+            data[i] = state.memory[offset + i - 1] or 0
+        end
+        
+        local hash = keccak256(data)
+        table.insert(state.stack, hash)
+        state.pc = state.pc + 1
+    ende.stack))
+        
         -- Extract data from memory
         local data = {}
         for i = 1, length do
             data[i] = state.memory[offset + i - 1] or 0
         end
         
-        -- Simple Keccak256 implementation (simplified for EVM)
+        -- Proper Keccak256 implementation
         local hash = keccak256(data)
         table.insert(state.stack, hash)
         state.pc = state.pc + 1
@@ -457,7 +644,6 @@ EVM.opcodes = {
             state.pc = state.pc + 1
         else
             print("offset: ", offset)
-            -- print("∆∆", offset, h(bytecode[offset+1]))
             
             if bytecode[offset] == 0x5B then -- JUMPDEST
                 state.pc = offset + 1
@@ -479,16 +665,6 @@ EVM.opcodes = {
         table.insert(state.stack, 0)
         state.pc = state.pc + 1
     end,
-    
-    -- To-do: Consider rewriting the stack operations to use a custom counter. e.g: https://www.lua.org/pil/11.4.html
-    -- PUSH1..PUSH32 are added dynamically.
-    -- 0x60 to 0x7F
-
-    -- DUP1..DUP16 are added dynamically.
-    -- 0x80..0x8F
-
-    -- SWAP1..SWAP16 are added dynamically.
-    -- 0x90..0x9F
 
     -- INVALID (0xFE) - designated invalid opcode per EIP-141
     [0xFE] = function(state)
@@ -559,8 +735,6 @@ for i = 1, 16 do
     end
 end
 
----------------------------------------------------
-
 local function printState(state)
     print("PC: ", state.pc)
 
@@ -617,31 +791,6 @@ function EVM.execute(state, bytecode)
     return state
 end
 
-local function memoryPage(table_in)
-    local table_in_size = #table_in
-    print("∆∆ ", table_in_size)
-    if table_in_size == 0 then
-        return {}
-    end
-
-    if table_in_size > 32 then
-        error("table_in larger than 32 bytes")
-        return {}
-    end
-
-    -- 32 bytes
-    local page = {
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    }
-    local page_size = 32
-
-    for i = 1, table_in_size do
-        print(i, table_in[table_in_size - i + 1], "goes to", page[32 - i + 1])
-        page[32 - i + 1] = table_in[table_in_size - i + 1]
-    end
-    return page
-end
-
 local function eth_call(contract)
     local bytecode_str = redis.call('GET', contract[1]) 
     local bytecode = hexStringToTable(bytecode_str)
@@ -649,7 +798,6 @@ local function eth_call(contract)
     EVM.execute(state, bytecode)
     local stack_top = state.stack[#state.stack]
     return h(stack_top)
-    -- return {state.stack, state.memory, state.storage, state.pc}
 end
 
 local function formatHexArray(arr)
@@ -697,5 +845,3 @@ if redis then
     redis.register_function('eth_call', eth_call)
     redis.register_function('eth_call_debug', eth_call_debug)
 end
-
--- eth_call()
