@@ -16,6 +16,8 @@ function EVM.init(addr)
         memory = {},
         storage = {},
         pc = 1,  -- Program Counter
+        logs = {},
+        return_data = {},
     }
     return evmState
 end
@@ -187,22 +189,24 @@ local SHA3_IOTA_L = {1,130,32898,32906,2147516416,2147483649,32777,138,136,21475
 
 local function rotl32(n, b)
     n = n % 0x100000000
-    return ((n << b) | (n >> (32 - b))) % 0x100000000
+    local left_shift = (n * (2^b)) % 0x100000000
+    local right_shift = math.floor(n / (2^(32-b)))
+    return (left_shift + right_shift) % 0x100000000
 end
 
 local function rotlH(h, l, s)
     if s > 32 then
-        return rotl32(l, s - 32) ~ rotl32(h, s - 32)
+        return bxor64(rotl32(l, s - 32), rotl32(h, s - 32))
     else
-        return rotl32(h, s) ~ (l >> (32 - s))
+        return bxor64(rotl32(h, s), math.floor(l / (2^(32-s))))
     end
 end
 
 local function rotlL(h, l, s)
     if s > 32 then
-        return rotl32(h, s - 32) ~ rotl32(l, s - 32)
+        return bxor64(rotl32(h, s - 32), rotl32(l, s - 32))
     else
-        return rotl32(l, s) ~ (h >> (32 - s))
+        return bxor64(rotl32(l, s), math.floor(h / (2^(32-s))))
     end
 end
 
@@ -213,8 +217,8 @@ local function keccakP(s)
     for round = 0, 23 do
         -- Theta
         for x = 0, 4 do
-            B[x * 2 + 1] = s[x * 2 + 1] ~ s[x * 2 + 11] ~ s[x * 2 + 21] ~ s[x * 2 + 31] ~ s[x * 2 + 41]
-            B[x * 2 + 2] = s[x * 2 + 2] ~ s[x * 2 + 12] ~ s[x * 2 + 22] ~ s[x * 2 + 32] ~ s[x * 2 + 42]
+            B[x * 2 + 1] = bxor64(bxor64(bxor64(bxor64(s[x * 2 + 1], s[x * 2 + 11]), s[x * 2 + 21]), s[x * 2 + 31]), s[x * 2 + 41])
+            B[x * 2 + 2] = bxor64(bxor64(bxor64(bxor64(s[x * 2 + 2], s[x * 2 + 12]), s[x * 2 + 22]), s[x * 2 + 32]), s[x * 2 + 42])
         end
         
         for x = 0, 4 do
@@ -222,12 +226,12 @@ local function keccakP(s)
             local idx0 = ((x + 1) % 5) * 2
             local B0 = B[idx0 + 1]
             local B1 = B[idx0 + 2]
-            local Th = rotlH(B0, B1, 1) ~ B[idx1 + 1]
-            local Tl = rotlL(B0, B1, 1) ~ B[idx1 + 2]
+            local Th = bxor64(rotlH(B0, B1, 1), B[idx1 + 1])
+            local Tl = bxor64(rotlL(B0, B1, 1), B[idx1 + 2])
             
             for y = 0, 4 do
-                s[x * 2 + y * 10 + 1] = s[x * 2 + y * 10 + 1] ~ Th
-                s[x * 2 + y * 10 + 2] = s[x * 2 + y * 10 + 2] ~ Tl
+                s[x * 2 + y * 10 + 1] = bxor64(s[x * 2 + y * 10 + 1], Th)
+                s[x * 2 + y * 10 + 2] = bxor64(s[x * 2 + y * 10 + 2], Tl)
             end
         end
         
@@ -253,14 +257,16 @@ local function keccakP(s)
                 B[x * 2 + 2] = s[y * 10 + x * 2 + 2]
             end
             for x = 0, 4 do
-                s[y * 10 + x * 2 + 1] = s[y * 10 + x * 2 + 1] ~ ((~B[((x + 1) % 5) * 2 + 1]) & B[((x + 2) % 5) * 2 + 1])
-                s[y * 10 + x * 2 + 2] = s[y * 10 + x * 2 + 2] ~ ((~B[((x + 1) % 5) * 2 + 2]) & B[((x + 2) % 5) * 2 + 2])
+                local not_b1 = bnot64(B[((x + 1) % 5) * 2 + 1])
+                local not_b2 = bnot64(B[((x + 1) % 5) * 2 + 2])
+                s[y * 10 + x * 2 + 1] = bxor64(s[y * 10 + x * 2 + 1], band64(not_b1, B[((x + 2) % 5) * 2 + 1]))
+                s[y * 10 + x * 2 + 2] = bxor64(s[y * 10 + x * 2 + 2], band64(not_b2, B[((x + 2) % 5) * 2 + 2]))
             end
         end
         
         -- Iota
-        s[1] = s[1] ~ SHA3_IOTA_H[round + 1]
-        s[2] = s[2] ~ SHA3_IOTA_L[round + 1]
+        s[1] = bxor64(s[1], SHA3_IOTA_H[round + 1])
+        s[2] = bxor64(s[2], SHA3_IOTA_L[round + 1])
     end
 end
 
@@ -282,7 +288,7 @@ local function keccak256(data)
     while dataPos < len do
         local take = math.min(blockLen - pos, len - dataPos)
         for i = 0, take - 1 do
-            state[pos + i + 1] = state[pos + i + 1] ~ bytes[dataPos + i + 1]
+            state[pos + i + 1] = bxor64(state[pos + i + 1], bytes[dataPos + i + 1])
         end
         pos = pos + take
         dataPos = dataPos + take
@@ -291,10 +297,10 @@ local function keccak256(data)
             -- Convert to 32-bit words
             for i = 0, 49 do
                 local byte_idx = i * 4
-                state32[i + 1] = state[byte_idx + 1] | 
-                               (state[byte_idx + 2] << 8) |
-                               (state[byte_idx + 3] << 16) |
-                               (state[byte_idx + 4] << 24)
+                state32[i + 1] = state[byte_idx + 1] + 
+                               (state[byte_idx + 2] * 256) +
+                               (state[byte_idx + 3] * 65536) +
+                               (state[byte_idx + 4] * 16777216)
             end
             
             keccakP(state32)
@@ -303,10 +309,10 @@ local function keccak256(data)
             for i = 0, 49 do
                 local word = state32[i + 1]
                 local byte_idx = i * 4
-                state[byte_idx + 1] = word & 0xFF
-                state[byte_idx + 2] = (word >> 8) & 0xFF
-                state[byte_idx + 3] = (word >> 16) & 0xFF
-                state[byte_idx + 4] = (word >> 24) & 0xFF
+                state[byte_idx + 1] = word % 256
+                state[byte_idx + 2] = math.floor(word / 256) % 256
+                state[byte_idx + 3] = math.floor(word / 65536) % 256
+                state[byte_idx + 4] = math.floor(word / 16777216) % 256
             end
             
             pos = 0
@@ -314,16 +320,16 @@ local function keccak256(data)
     end
     
     -- Padding
-    state[pos + 1] = state[pos + 1] ~ 0x01
-    state[blockLen] = state[blockLen] ~ 0x80
+    state[pos + 1] = bxor64(state[pos + 1], 0x01)
+    state[blockLen] = bxor64(state[blockLen], 0x80)
     
     -- Final permutation
     for i = 0, 49 do
         local byte_idx = i * 4
-        state32[i + 1] = state[byte_idx + 1] | 
-                       (state[byte_idx + 2] << 8) |
-                       (state[byte_idx + 3] << 16) |
-                       (state[byte_idx + 4] << 24)
+        state32[i + 1] = state[byte_idx + 1] + 
+                       (state[byte_idx + 2] * 256) +
+                       (state[byte_idx + 3] * 65536) +
+                       (state[byte_idx + 4] * 16777216)
     end
     
     keccakP(state32)
@@ -331,10 +337,10 @@ local function keccak256(data)
     for i = 0, 49 do
         local word = state32[i + 1]
         local byte_idx = i * 4
-        state[byte_idx + 1] = word & 0xFF
-        state[byte_idx + 2] = (word >> 8) & 0xFF
-        state[byte_idx + 3] = (word >> 16) & 0xFF
-        state[byte_idx + 4] = (word >> 24) & 0xFF
+        state[byte_idx + 1] = word % 256
+        state[byte_idx + 2] = math.floor(word / 256) % 256
+        state[byte_idx + 3] = math.floor(word / 65536) % 256
+        state[byte_idx + 4] = math.floor(word / 16777216) % 256
     end
     
     -- Extract 32 bytes
@@ -533,6 +539,25 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- NOT
+    [0x19] = function(state)
+        local a = toNumber(table.remove(state.stack))
+        table.insert(state.stack, bnot64(a))
+        state.pc = state.pc + 1
+    end,
+
+    -- EXP
+    [0x0A] = function(state)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
+        local result = 1
+        for i = 1, b do
+            result = result * a
+        end
+        table.insert(state.stack, result)
+        state.pc = state.pc + 1
+    end,
+
     -- KECCAK256 (SHA3)
     [0x20] = function(state)
         local offset = toNumber(table.remove(state.stack))
@@ -546,17 +571,103 @@ EVM.opcodes = {
         local hash = keccak256(data)
         table.insert(state.stack, hash)
         state.pc = state.pc + 1
-    ende.stack))
-        
-        -- Extract data from memory
-        local data = {}
-        for i = 1, length do
-            data[i] = state.memory[offset + i - 1] or 0
+    end,
+
+    -- ADDRESS
+    [0x30] = function(state)
+        table.insert(state.stack, state.address)
+        state.pc = state.pc + 1
+    end,
+
+    -- CALLER
+    [0x33] = function(state)
+        local caller = redis.call("GET", "CALLER") or "0x0000000000000000000000000000000000000000"
+        table.insert(state.stack, caller)
+        state.pc = state.pc + 1
+    end,
+
+    -- GASPRICE
+    [0x3A] = function(state)
+        local gasprice = redis.call("GET", "GASPRICE") or 1000000000
+        table.insert(state.stack, toNumber(gasprice))
+        state.pc = state.pc + 1
+    end,
+
+    -- CALLVALUE
+    [0x34] = function(state)
+        local value = redis.call("GET", "CALLVALUE") or 0
+        table.insert(state.stack, toNumber(value))
+        state.pc = state.pc + 1
+    end,
+
+    -- CALLDATALOAD
+    [0x35] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local calldata = redis.call("GET", "CALLDATA") or ""
+        local data_bytes = hexStringToTable(calldata)
+        local value = 0
+        for i = 0, 31 do
+            local byte_val = data_bytes[offset + i + 1] or 0
+            value = value + (byte_val * (256 ^ (31 - i)))
         end
-        
-        -- Proper Keccak256 implementation
-        local hash = keccak256(data)
-        table.insert(state.stack, hash)
+        table.insert(state.stack, value)
+        state.pc = state.pc + 1
+    end,
+
+    -- CALLDATASIZE
+    [0x36] = function(state)
+        local calldata = redis.call("GET", "CALLDATA") or ""
+        local size = math.floor(#calldata / 2)
+        table.insert(state.stack, size)
+        state.pc = state.pc + 1
+    end,
+
+    -- CODECOPY
+    [0x39] = function(state)
+        local dest_offset = toNumber(table.remove(state.stack))
+        local code_offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        local code = redis.call("GET", state.address) or ""
+        local code_bytes = hexStringToTable(code)
+        for i = 0, length - 1 do
+            state.memory[dest_offset + i] = code_bytes[code_offset + i + 1] or 0
+        end
+        state.pc = state.pc + 1
+    end,
+
+    -- BLOCKHASH
+    [0x40] = function(state)
+        local block_number = toNumber(table.remove(state.stack))
+        local blockhash = redis.call("GET", "BLOCKHASH") or "0x0000000000000000000000000000000000000000000000000000000000000000"
+        table.insert(state.stack, blockhash)
+        state.pc = state.pc + 1
+    end,
+
+    -- NUMBER
+    [0x43] = function(state)
+        local block_number = redis.call("GET", "NUMBER") or 0
+        table.insert(state.stack, toNumber(block_number))
+        state.pc = state.pc + 1
+    end,
+
+    -- TIMESTAMP
+    [0x42] = function(state)
+        local timestamp = redis.call("GET", "TIMESTAMP") or 0
+        table.insert(state.stack, toNumber(timestamp))
+        state.pc = state.pc + 1
+    end,
+
+    -- CHAINID
+    [0x46] = function(state)
+        local chainid = redis.call("GET", "CHAINID") or 1
+        table.insert(state.stack, toNumber(chainid))
+        state.pc = state.pc + 1
+    end,
+
+    -- GAS
+    [0x5A] = function(state)
+        local gas = redis.call("GET", "GAS") or 21000
+        table.insert(state.stack, toNumber(gas))
         state.pc = state.pc + 1
     end,
 
@@ -621,6 +732,18 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- SSTORE
+    [0x55] = function(state)
+        local storage_position = toNumber(table.remove(state.stack))
+        local value = toNumber(table.remove(state.stack))
+        local hex_position = string.format("%X", storage_position)
+        if #hex_position % 2 == 1 then
+            hex_position = "0" .. hex_position
+        end
+        redis.call("SET", state.address .. ":" .. hex_position, string.format("%X", value))
+        state.pc = state.pc + 1
+    end,
+
     -- JUMP
     [0x56] = function(state, bytecode)
         print("JUMP")
@@ -663,6 +786,132 @@ EVM.opcodes = {
     -- PUSH0
     [0x5F] = function(state, bytecode)
         table.insert(state.stack, 0)
+        state.pc = state.pc + 1
+    end,
+
+    -- SHR
+    [0x1C] = function(state)
+        local value = toNumber(table.remove(state.stack))
+        local shift = toNumber(table.remove(state.stack))
+        table.insert(state.stack, math.floor(value / (2 ^ shift)))
+        state.pc = state.pc + 1
+    end,
+
+    -- RETURN
+    [0xF3] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        state.return_data = {}
+        for i = 0, length - 1 do
+            state.return_data[i + 1] = state.memory[offset + i] or 0
+        end
+        state.running = false
+    end,
+
+    -- REVERT
+    [0xFD] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        state.return_data = {}
+        for i = 0, length - 1 do
+            state.return_data[i + 1] = state.memory[offset + i] or 0
+        end
+        state.running = false
+        state.reverted = true
+    end,
+
+    -- RETURNDATASIZE
+    [0x3D] = function(state)
+        local size = state.return_data and #state.return_data or 0
+        table.insert(state.stack, size)
+        state.pc = state.pc + 1
+    end,
+
+    -- RETURNDATACOPY
+    [0x3E] = function(state)
+        local dest_offset = toNumber(table.remove(state.stack))
+        local data_offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        if state.return_data then
+            for i = 0, length - 1 do
+                state.memory[dest_offset + i] = state.return_data[data_offset + i + 1] or 0
+            end
+        end
+        state.pc = state.pc + 1
+    end,
+
+    -- STATICCALL
+    [0xFA] = function(state)
+        local gas = toNumber(table.remove(state.stack))
+        local address = table.remove(state.stack)
+        local args_offset = toNumber(table.remove(state.stack))
+        local args_length = toNumber(table.remove(state.stack))
+        local ret_offset = toNumber(table.remove(state.stack))
+        local ret_length = toNumber(table.remove(state.stack))
+        -- Simplified: just push success (1) for now
+        table.insert(state.stack, 1)
+        state.pc = state.pc + 1
+    end,
+
+    -- LOG1
+    [0xA0] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        local topic1 = table.remove(state.stack)
+        local log_data = {}
+        for i = 0, length - 1 do
+            log_data[i + 1] = state.memory[offset + i] or 0
+        end
+        state.logs = state.logs or {}
+        table.insert(state.logs, {data = log_data, topics = {topic1}})
+        state.pc = state.pc + 1
+    end,
+
+    -- LOG2
+    [0xA1] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        local topic1 = table.remove(state.stack)
+        local topic2 = table.remove(state.stack)
+        local log_data = {}
+        for i = 0, length - 1 do
+            log_data[i + 1] = state.memory[offset + i] or 0
+        end
+        state.logs = state.logs or {}
+        table.insert(state.logs, {data = log_data, topics = {topic1, topic2}})
+        state.pc = state.pc + 1
+    end,
+
+    -- LOG3
+    [0xA2] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        local topic1 = table.remove(state.stack)
+        local topic2 = table.remove(state.stack)
+        local topic3 = table.remove(state.stack)
+        local log_data = {}
+        for i = 0, length - 1 do
+            log_data[i + 1] = state.memory[offset + i] or 0
+        end
+        state.logs = state.logs or {}
+        table.insert(state.logs, {data = log_data, topics = {topic1, topic2, topic3}})
+        state.pc = state.pc + 1
+    end,
+
+    -- LOG4
+    [0xA3] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        local topic1 = table.remove(state.stack)
+        local topic2 = table.remove(state.stack)
+        local topic3 = table.remove(state.stack)
+        local topic4 = table.remove(state.stack)
+        local log_data = {}
+        for i = 0, length - 1 do
+            log_data[i + 1] = state.memory[offset + i] or 0
+        end
+        state.logs = state.logs or {}
+        table.insert(state.logs, {data = log_data, topics = {topic1, topic2, topic3, topic4}})
         state.pc = state.pc + 1
     end,
 

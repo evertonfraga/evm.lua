@@ -70,7 +70,7 @@ main() {
     ensure_redis_running
     load_evm_function
     
-    local total_suites=7
+    local total_suites=11
     local passed_suites=0
     local failed_suites=0
     
@@ -83,6 +83,10 @@ main() {
         "test-storage.sh:Storage Operations"
         "test-keccak.sh:KECCAK256 Hash Operations"
         "test-memory.sh:Memory Operations"
+        "test-bitwise.sh:Bitwise Operations"
+        "test-blockchain-context.sh:Blockchain Context"
+        "test-logging.sh:Logging Operations"
+        "test-calldata.sh:Calldata Operations"
     )
     
     # Run each test suite
