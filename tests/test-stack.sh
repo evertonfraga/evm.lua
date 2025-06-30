@@ -92,6 +92,123 @@ test_push3() {
     fi
 }
 
+# Test PUSH4 opcode (0x63)
+test_push4() {
+    local contract_addr="0x000000000000000000000000000000000000003A"
+    redis-cli SET "$contract_addr" "63 12 34 56 78 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [ "$result" = "0x12345678" ]; then
+        success "PUSH4 Test Passed: PUSH4 0x12345678 = $result"
+        return 0
+    else
+        fail "PUSH4 Test Failed" "0x12345678" "$result"
+        return 1
+    fi
+}
+
+# Test PUSH4 opcode (0x63) - more bytes
+test_push5() {
+    local contract_addr="0x000000000000000000000000000000000000003B"
+    redis-cli SET "$contract_addr" "64 12 34 56 78 9A 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [ "$result" = "0x123456789A" ]; then
+        success "PUSH5 Test Passed: PUSH5 works correctly"
+        return 0
+    else
+        fail "PUSH5 Test Failed" "0x123456789A" "$result"
+        return 1
+    fi
+}
+
+# Test PUSH6 opcode (0x65)
+test_push6() {
+    local contract_addr="0x000000000000000000000000000000000000003C"
+    redis-cli SET "$contract_addr" "65 12 34 56 78 9A BC 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [ "$result" = "0x123456789ABC" ]; then
+        success "PUSH6 Test Passed: PUSH6 works correctly"
+        return 0
+    else
+        fail "PUSH6 Test Failed" "0x123456789ABC" "$result"
+        return 1
+    fi
+}
+
+# Test PUSH7 opcode (0x66)
+test_push7() {
+    local contract_addr="0x000000000000000000000000000000000000003D"
+    redis-cli SET "$contract_addr" "66 12 34 56 78 9A BC DE 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [ "$result" = "0x123456789ABCDE" ]; then
+        success "PUSH7 Test Passed: PUSH7 works correctly"
+        return 0
+    else
+        fail "PUSH7 Test Failed" "0x123456789ABCDE" "$result"
+        return 1
+    fi
+}
+
+# Test PUSH8 opcode (0x67) - Maximum 8-byte value
+test_push8() {
+    local contract_addr="0x000000000000000000000000000000000000003E"
+    # PUSH8 with all FF bytes - tests maximum 8-byte value (2^64 - 1)
+    redis-cli SET "$contract_addr" "67 FF FF FF FF FF FF FF FF 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [[ "$result" = "0xFFFFFFFFFFFFFFFF" ]]; then
+        success "PUSH8 Test Passed: PUSH8 handles max 8-byte value"
+        return 0
+    else
+        fail "PUSH8 Test Failed" "0xFFFFFFFFFFFFFFFF" "$result"
+        return 1
+    fi
+}
+
+# Test PUSH16 opcode (0x6F) - Maximum 16-byte value
+test_push16() {
+    local contract_addr="0x000000000000000000000000000000000000003F"
+    # PUSH16 with all FF bytes - tests maximum 16-byte value (2^128 - 1)
+    redis-cli SET "$contract_addr" "6F FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [[ "$result" = "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" ]]; then
+        success "PUSH16 Test Passed: PUSH16 handles max 16-byte value"
+        return 0
+    else
+        fail "PUSH16 Test Failed" "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" "$result"
+        return 1
+    fi
+}
+
+# Test PUSH32 opcode (0x7F)
+test_push32() {
+    local contract_addr="0x0000000000000000000000000000000000000040"
+    # Simple PUSH32 with mostly zeros to avoid overflow
+    redis-cli SET "$contract_addr" "7F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 42 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [ "$result" = "0x42" ]; then 
+        success "PUSH32 Test Passed: PUSH32 pushes 32-byte value (0x42)"
+        return 0
+    else
+        fail "PUSH32 Test Failed" "0x42" "$result"
+        return 1
+    fi
+}
+
+# Test PUSH32 with all FF bytes
+test_push32_ff() {
+    local contract_addr="0x0000000000000000000000000000000000000041"
+    # PUSH32 with all FF bytes - tests maximum value handling
+    redis-cli SET "$contract_addr" "7F FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+
+    if [[ "$result" = "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" ]]; then
+        success "PUSH32 FF Test Passed: PUSH32 handles max value correctly"
+        return 0
+    else
+        fail "PUSH32 FF Test Failed" "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF" "$result"
+        return 1
+    fi
+}
+
 # Test DUP1 opcode (0x80)
 test_dup1() {
     local contract_addr="0x0000000000000000000000000000000000000025"
@@ -122,6 +239,46 @@ test_dup2() {
         return 0
     else
         fail "DUP2 Test Failed" "0x0A" "$result"
+        return 1
+    fi
+}
+
+# Test DUP3-DUP16 opcodes (0x82-0x8F)
+test_dup3() {
+    local contract_addr="0x0000000000000000000000000000000000000037"
+    redis-cli SET "$contract_addr" "60 01 60 02 60 03 82 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [ "$result" = "0x01" ]; then
+        success "DUP3 Test Passed: DUP3 duplicates correctly"
+        return 0
+    else
+        fail "DUP3 Test Failed" "0x01" "$result"
+        return 1
+    fi
+}
+
+test_dup4() {
+    local contract_addr="0x0000000000000000000000000000000000000038"
+    redis-cli SET "$contract_addr" "60 01 60 02 60 03 60 04 83 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [ "$result" = "0x01" ]; then
+        success "DUP4 Test Passed: DUP4 duplicates correctly"
+        return 0
+    else
+        fail "DUP4 Test Failed" "0x01" "$result"
+        return 1
+    fi
+}
+
+test_dup16() {
+    local contract_addr="0x0000000000000000000000000000000000000039"
+    redis-cli SET "$contract_addr" "60 01 60 02 60 03 60 04 60 05 60 06 60 07 60 08 60 09 60 0A 60 0B 60 0C 60 0D 60 0E 60 0F 60 10 8F 00"
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    if [ "$result" = "0x01" ]; then
+        success "DUP16 Test Passed: DUP16 duplicates correctly"
+        return 0
+    else
+        fail "DUP16 Test Failed" "0x01" "$result"
         return 1
     fi
 }
@@ -376,7 +533,7 @@ main() {
     ensure_redis_running
     load_evm_function
 
-    local total_tests=23
+    local total_tests=34
     local passed_tests=0
 
     test_pop && ((passed_tests++))
@@ -384,8 +541,19 @@ main() {
     test_push1 && ((passed_tests++))
     test_push2 && ((passed_tests++))
     test_push3 && ((passed_tests++))
+    test_push4 && ((passed_tests++))
+    test_push5 && ((passed_tests++))
+    test_push6 && ((passed_tests++))
+    test_push7 && ((passed_tests++))
+    test_push8 && ((passed_tests++))
+    test_push16 && ((passed_tests++))
+    test_push32 && ((passed_tests++))
+    test_push32_ff && ((passed_tests++))
     test_dup1 && ((passed_tests++))
     test_dup2 && ((passed_tests++))
+    test_dup3 && ((passed_tests++))
+    test_dup4 && ((passed_tests++))
+    test_dup16 && ((passed_tests++))
     test_swap1 && ((passed_tests++))
     test_swap2 && ((passed_tests++))
     test_swap3 && ((passed_tests++))

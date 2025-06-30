@@ -11,7 +11,7 @@ end
 -- Define a local environment for the EVM implementation
 local EVM = {}
 
--- Initialize the necessary components for the EVM
+-- Initialize some necessary components for the EVM
 function EVM.init(addr)
     -- Initialize state attributes
     local evmState = {
@@ -88,6 +88,7 @@ local function toNumber(val)
     end
 end
 
+-- display hex data in string representation
 local function h(n)
     if n == nil then
         return "0x00"
@@ -262,7 +263,6 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
     
-
     -- SLT
     [0x12] = function(state, bytecode)
         local a = toNumber(table.remove(state.stack))
@@ -474,16 +474,15 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
-    -- To-do: extract stack operations (table.insert, table.remove) to a function
-    -- To-do: Consider rewriting the stack operations to use a custom counter. e.g: https://www.lua.org/pil/11.4.html
     -- PUSH0
     [0x5F] = function(state, bytecode)
         table.insert(state.stack, 0)
         state.pc = state.pc + 1
     end,
-
-    -- PUSH1..PUSH7 are added dynamically.
-    -- 0x60 to 0x66
+    
+    -- To-do: Consider rewriting the stack operations to use a custom counter. e.g: https://www.lua.org/pil/11.4.html
+    -- PUSH1..PUSH32 are added dynamically.
+    -- 0x60 to 0x7F
 
     -- DUP1..DUP16 are added dynamically.
     -- 0x80..0x8F
@@ -524,7 +523,7 @@ local function pushN(state, bytecode, numBytes)
     end
 end
 for i = 1, 32 do
-    local opcode = 0x5F + i  -- Calculating the opcode (0x60 is PUSH1)
+    local opcode = 0x60 - 1 + i  -- Calculating the opcode (0x60 is PUSH1)
     EVM.opcodes[opcode] = function(state, bytecode)
         pushN(state, bytecode, i)
     end
@@ -560,7 +559,6 @@ for i = 1, 16 do
     end
 end
 
-
 ---------------------------------------------------
 
 local function printState(state)
@@ -591,7 +589,6 @@ local function printState(state)
 
 end
 
-
 -- Function to execute opcodes
 function EVM.execute(state, bytecode)
     state.running = true
@@ -609,15 +606,16 @@ function EVM.execute(state, bytecode)
             print(state.pc, h(opcode))
             EVM.opcodes[opcode](state, bytecode)
         else
-            -- Handle unknown opcode
-            print("Unknown opcode: ", opcode)
+            -- Handle unknown opcode - align with EVM specs
+            print("Invalid opcode: ", h(opcode))
             state.running = false
+            state.invalid_opcode = true
+            error("Invalid opcode: " .. h(opcode))
         end
         printState(state)
     end
     return state
 end
-
 
 local function memoryPage(table_in)
     local table_in_size = #table_in
@@ -649,10 +647,10 @@ local function eth_call(contract)
     local bytecode = hexStringToTable(bytecode_str)
     local state = EVM.init(contract[1])
     EVM.execute(state, bytecode)
-    return h(state.stack[#state.stack])
+    local stack_top = state.stack[#state.stack]
+    return h(stack_top)
     -- return {state.stack, state.memory, state.storage, state.pc}
 end
-
 
 local function formatHexArray(arr)
     if not arr or #arr == 0 then
