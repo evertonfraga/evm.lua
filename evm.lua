@@ -15,6 +15,7 @@ function EVM.init(addr)
         stack = {},
         memory = {},
         storage = {},
+        transient_storage = {},  -- Transient storage for TLOAD/TSTORE
         pc = 1,  -- Program Counter
         logs = {},
         return_data = {},
@@ -68,6 +69,63 @@ local function toNumber(val)
     else
         return tonumber(val) or 0
     end
+end
+
+-- Redis key generation and validation helpers for environmental context
+
+-- Generate Redis key for account balance
+local function balance_key(address)
+    -- Ensure address is properly formatted
+    local addr_str = type(address) == "number" and string.format("0x%040X", address) or tostring(address)
+    -- Remove 0x prefix if present and ensure lowercase
+    addr_str = addr_str:gsub("^0x", ""):lower()
+    return "BALANCE:" .. addr_str
+end
+
+-- Generate Redis key for contract code storage
+local function code_key(address)
+    -- Ensure address is properly formatted
+    local addr_str = type(address) == "number" and string.format("0x%040X", address) or tostring(address)
+    -- Remove 0x prefix if present and ensure lowercase
+    addr_str = addr_str:gsub("^0x", ""):lower()
+    return "CODE:" .. addr_str
+end
+
+-- Generate Redis key for contract code hash storage
+local function codehash_key(address)
+    -- Ensure address is properly formatted
+    local addr_str = type(address) == "number" and string.format("0x%040X", address) or tostring(address)
+    -- Remove 0x prefix if present and ensure lowercase
+    addr_str = addr_str:gsub("^0x", ""):lower()
+    return "CODEHASH:" .. addr_str
+end
+
+-- Validate Redis key format for environmental context
+local function validate_env_key(key, expected_prefix)
+    if not key or type(key) ~= "string" then
+        return false
+    end
+    
+    if not key:match("^" .. expected_prefix .. ":") then
+        return false
+    end
+    
+    -- Extract address part and validate hex format
+    local address_part = key:sub(#expected_prefix + 2)  -- +2 for ":"
+    if not address_part:match("^[0-9a-f]+$") then
+        return false
+    end
+    
+    return true
+end
+
+-- Helper to safely get environmental data from Redis with defaults
+local function get_env_data(key, default_value)
+    local value = redis.call("GET", key)
+    if value == nil or value == false then
+        return default_value
+    end
+    return value
 end
 
 -- display hex data in string representation
@@ -733,6 +791,23 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- BALANCE (0x31) - Get account balance
+    [0x31] = function(state)
+        local address = table.remove(state.stack)
+        local balance_key = balance_key(address)
+        local balance = get_env_data(balance_key, "0")
+        table.insert(state.stack, toNumber(balance))
+        state.pc = state.pc + 1
+    end,
+
+    -- ORIGIN (0x32) - Get transaction origin address
+    [0x32] = function(state)
+        local origin = get_env_data("ORIGIN", "0x0000000000000000000000000000000000000000")
+        -- Keep as string to preserve full address
+        table.insert(state.stack, origin)
+        state.pc = state.pc + 1
+    end,
+
     -- CALLER
     [0x33] = function(state)
         local caller = redis.call("GET", "CALLER") or "0x0000000000000000000000000000000000000000"
@@ -776,6 +851,50 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- CALLDATACOPY (0x37) - Copy calldata to memory
+    [0x37] = function(state)
+        local dest_offset = toNumber(table.remove(state.stack))
+        local data_offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        
+        -- Get calldata from Redis
+        local calldata = redis.call("GET", "CALLDATA") or ""
+        local data_bytes = hexStringToTable(calldata)
+        
+        -- Copy bytes from calldata to memory with bounds checking
+        -- (Memory expansion is automatic in Lua tables)
+        for i = 0, length - 1 do
+            local calldata_index = data_offset + i + 1  -- +1 for Lua 1-based indexing
+            local memory_index = dest_offset + i        -- 0-based memory indexing
+            
+            -- If we're reading beyond calldata bounds, pad with zeros
+            if calldata_index <= #data_bytes then
+                state.memory[memory_index] = data_bytes[calldata_index]
+            else
+                state.memory[memory_index] = 0
+            end
+        end
+        
+        state.pc = state.pc + 1
+    end,
+
+    -- CODESIZE (0x38) - Get executing contract code size
+    [0x38] = function(state)
+        -- Get the current contract's code from Redis (stored under the contract address)
+        local code = redis.call("GET", state.address) or ""
+        
+        -- Calculate code size in bytes (hex string length / 2)
+        local code_size = 0
+        if code and code ~= "" then
+            -- Remove 0x prefix if present and remove spaces
+            local hex_code = code:gsub("^0x", ""):gsub("%s+", "")
+            code_size = math.floor(#hex_code / 2)
+        end
+        
+        table.insert(state.stack, code_size)
+        state.pc = state.pc + 1
+    end,
+
     -- CODECOPY
     [0x39] = function(state)
         local dest_offset = toNumber(table.remove(state.stack))
@@ -797,10 +916,10 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
-    -- NUMBER
-    [0x43] = function(state)
-        local block_number = redis.call("GET", "NUMBER") or 0
-        table.insert(state.stack, toNumber(block_number))
+    -- COINBASE (0x41) - Get block coinbase address
+    [0x41] = function(state)
+        local coinbase = get_env_data("COINBASE", "0x0000000000000000000000000000000000000000")
+        table.insert(state.stack, coinbase)
         state.pc = state.pc + 1
     end,
 
@@ -811,10 +930,46 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- NUMBER
+    [0x43] = function(state)
+        local block_number = redis.call("GET", "NUMBER") or 0
+        table.insert(state.stack, toNumber(block_number))
+        state.pc = state.pc + 1
+    end,
+
+    -- PREVRANDAO (0x44) - Get previous block randomness
+    [0x44] = function(state)
+        local prevrandao = get_env_data("PREVRANDAO", "0x0000000000000000000000000000000000000000000000000000000000000000")
+        table.insert(state.stack, prevrandao)
+        state.pc = state.pc + 1
+    end,
+
+    -- GASLIMIT (0x45) - Get block gas limit
+    [0x45] = function(state)
+        local gaslimit = get_env_data("GASLIMIT", "30000000")  -- Default 30M gas limit
+        table.insert(state.stack, toNumber(gaslimit))
+        state.pc = state.pc + 1
+    end,
+
     -- CHAINID
     [0x46] = function(state)
         local chainid = redis.call("GET", "CHAINID") or 1
         table.insert(state.stack, toNumber(chainid))
+        state.pc = state.pc + 1
+    end,
+
+    -- SELFBALANCE (0x47) - Get current contract balance
+    [0x47] = function(state)
+        local balance_key = balance_key(state.address)
+        local balance = get_env_data(balance_key, "0")
+        table.insert(state.stack, toNumber(balance))
+        state.pc = state.pc + 1
+    end,
+
+    -- BASEFEE (0x48) - Get block base fee
+    [0x48] = function(state)
+        local basefee = get_env_data("BASEFEE", "1000000000")  -- Default 1 gwei
+        table.insert(state.stack, toNumber(basefee))
         state.pc = state.pc + 1
     end,
 
@@ -834,13 +989,27 @@ EVM.opcodes = {
     -- MLOAD
     [0x51] = function(state)
         local offset = toNumber(table.remove(state.stack))
-        local value = 0
-        -- Load 32 bytes from memory
+        
+        -- Load 32 bytes from memory and construct hex string
+        local hex_string = ""
         for i = 0, 31 do
             local byte_val = state.memory[offset + i] or 0
-            value = value + (byte_val * (256 ^ (31 - i)))
+            hex_string = hex_string .. string.format("%02X", byte_val)
         end
-        table.insert(state.stack, value)
+        
+        -- For small values (up to 7 bytes), convert to number
+        -- For larger values, store as hex string to preserve precision
+        local leading_zeros = hex_string:match("^(0*)")
+        local significant_hex = hex_string:sub(#leading_zeros + 1)
+        
+        if #significant_hex <= 14 then  -- 7 bytes or less
+            local value = tonumber(significant_hex, 16) or 0
+            table.insert(state.stack, value)
+        else
+            -- Store as hex string for large values
+            table.insert(state.stack, "0x" .. hex_string)
+        end
+        
         state.pc = state.pc + 1
     end,
 
@@ -895,6 +1064,63 @@ EVM.opcodes = {
             hex_position = "0" .. hex_position
         end
         redis.call("SET", state.address .. ":" .. hex_position, string.format("%X", value))
+        state.pc = state.pc + 1
+    end,
+
+    -- TLOAD (0x5C) - Load from transient storage
+    [0x5C] = function(state)
+        local storage_position = toNumber(table.remove(state.stack))
+        local value = state.transient_storage[storage_position] or 0
+        table.insert(state.stack, value)
+        state.pc = state.pc + 1
+    end,
+
+    -- TSTORE (0x5D) - Store to transient storage
+    [0x5D] = function(state)
+        local storage_position = toNumber(table.remove(state.stack))
+        local value = toNumber(table.remove(state.stack))
+        state.transient_storage[storage_position] = value
+        state.pc = state.pc + 1
+    end,
+
+    -- MCOPY (0x5E) - Memory to memory copy
+    [0x5E] = function(state)
+        local dest = toNumber(table.remove(state.stack))
+        local src = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        
+        -- Handle edge case: zero length copy
+        if length == 0 then
+            state.pc = state.pc + 1
+            return
+        end
+        
+        -- Expand memory if necessary for both source and destination
+        local max_src = src + length - 1
+        local max_dest = dest + length - 1
+        local required_size = math.max(max_src, max_dest) + 1
+        
+        -- Ensure memory is expanded to required size
+        while #state.memory < required_size do
+            table.insert(state.memory, 0)
+        end
+        
+        -- Perform the copy operation
+        -- Handle overlapping regions correctly by copying in the right direction
+        if dest <= src then
+            -- Copy forward (left to right)
+            for i = 0, length - 1 do
+                local src_byte = state.memory[src + i] or 0
+                state.memory[dest + i] = src_byte
+            end
+        else
+            -- Copy backward (right to left) to handle overlapping regions
+            for i = length - 1, 0, -1 do
+                local src_byte = state.memory[src + i] or 0
+                state.memory[dest + i] = src_byte
+            end
+        end
+        
         state.pc = state.pc + 1
     end,
 
@@ -1060,8 +1286,8 @@ EVM.opcodes = {
         -- Calculate code size in bytes (hex string length / 2)
         local code_size = 0
         if code and code ~= "" then
-            -- Remove 0x prefix if present
-            local hex_code = code:gsub("^0x", "")
+            -- Remove 0x prefix and spaces
+            local hex_code = code:gsub("^0x", ""):gsub(" ", "")
             code_size = math.floor(#hex_code / 2)
         end
         
@@ -1336,7 +1562,14 @@ local function eth_call(contract)
     local state = EVM.init(contract[1])
     EVM.execute(state, bytecode)
     local stack_top = state.stack[#state.stack]
-    return h(stack_top)
+    
+    -- Check if stack_top is a full address (42 chars total: 0x + 40 hex chars)
+    if type(stack_top) == "string" and stack_top:match("^0x[0-9A-Fa-f]+$") then
+        if #stack_top == 42 then
+            return stack_top  -- Return full address without formatting
+        end
+    end
+    return h(stack_top)  -- Use normal formatting for all other values including 32-byte values
 end
 
 local function formatHexArray(arr)
