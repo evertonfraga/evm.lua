@@ -352,6 +352,49 @@ local function keccak256(data)
     return result
 end
 
+-- Utility functions for enhanced arithmetic operations
+
+-- Safe stack pop function with underflow protection
+local function safe_pop(stack, count)
+    count = count or 1
+    if #stack < count then
+        error("Stack underflow: attempted to pop " .. count .. " items from stack of size " .. #stack)
+    end
+    local values = {}
+    for i = 1, count do
+        table.insert(values, table.remove(stack))
+    end
+    if count == 1 then
+        return values[1]
+    else
+        return table.unpack(values)
+    end
+end
+
+-- Helper for signed arithmetic operations
+local function signed_arithmetic(value)
+    -- Convert unsigned 256-bit value to signed
+    -- If the high bit is set, it's negative in two's complement
+    if value >= 2^255 then
+        return value - 2^256
+    else
+        return value
+    end
+end
+
+-- Helper for modulo operations with proper zero handling
+local function mod_arithmetic(a, b)
+    if b == 0 then
+        return 0
+    end
+    local result = a % b
+    -- Ensure result is always positive for unsigned operations
+    if result < 0 then
+        result = result + math.abs(b)
+    end
+    return result
+end
+
 -- Define opcodes
 EVM.opcodes = {
     -- STOP
@@ -425,6 +468,54 @@ EVM.opcodes = {
             result = 0
         else 
             result = a % b
+        end
+        table.insert(state.stack, result)
+        state.pc = state.pc + 1
+    end,
+
+    -- SMOD (0x07) - Signed modulo operation
+    [0x07] = function(state)
+        local a = signed_arithmetic(toNumber(table.remove(state.stack)))
+        local b = signed_arithmetic(toNumber(table.remove(state.stack)))
+        local result = 0
+        if b == 0 then
+            result = 0
+        else
+            result = a % b
+            -- Handle sign properly for signed modulo
+            if (a < 0) ~= (b < 0) and result ~= 0 then
+                result = result + b
+            end
+        end
+        table.insert(state.stack, result)
+        state.pc = state.pc + 1
+    end,
+
+    -- ADDMOD (0x08) - Addition modulo operation
+    [0x08] = function(state)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
+        local N = toNumber(table.remove(state.stack))
+        local result = 0
+        if N == 0 then
+            result = 0
+        else
+            result = (a + b) % N
+        end
+        table.insert(state.stack, result)
+        state.pc = state.pc + 1
+    end,
+
+    -- MULMOD (0x09) - Multiplication modulo operation
+    [0x09] = function(state)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
+        local N = toNumber(table.remove(state.stack))
+        local result = 0
+        if N == 0 then
+            result = 0
+        else
+            result = (a * b) % N
         end
         table.insert(state.stack, result)
         state.pc = state.pc + 1
@@ -539,10 +630,42 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- XOR (0x18) - Bitwise exclusive OR
+    [0x18] = function(state)
+        local a = toNumber(table.remove(state.stack))
+        local b = toNumber(table.remove(state.stack))
+        table.insert(state.stack, bxor64(a, b))
+        state.pc = state.pc + 1
+    end,
+
     -- NOT
     [0x19] = function(state)
         local a = toNumber(table.remove(state.stack))
         table.insert(state.stack, bnot64(a))
+        state.pc = state.pc + 1
+    end,
+
+    -- BYTE (0x1A) - Extract byte from 32-byte word
+    [0x1A] = function(state)
+        local i = toNumber(table.remove(state.stack))
+        local val = toNumber(table.remove(state.stack))
+        
+        if i >= 32 then
+            table.insert(state.stack, 0)
+        else
+            -- Extract byte at position i (0 is most significant byte)
+            -- Convert to 32-byte representation and extract byte
+            local bytes = {}
+            local temp_val = val
+            
+            -- Fill bytes array (little endian)
+            for j = 0, 31 do
+                bytes[31 - j] = temp_val % 256
+                temp_val = math.floor(temp_val / 256)
+            end
+            
+            table.insert(state.stack, bytes[i] or 0)
+        end
         state.pc = state.pc + 1
     end,
 
@@ -555,6 +678,37 @@ EVM.opcodes = {
             result = result * a
         end
         table.insert(state.stack, result)
+        state.pc = state.pc + 1
+    end,
+
+    -- SIGNEXTEND (0x0B) - Sign extension operation
+    [0x0B] = function(state)
+        local i = toNumber(table.remove(state.stack))
+        local x = toNumber(table.remove(state.stack))
+        
+        if i >= 32 then
+            -- If i >= 32, no sign extension needed
+            table.insert(state.stack, x)
+        else
+            -- Sign extend from byte i
+            local sign_bit_pos = (i * 8) + 7
+            local sign_bit = math.floor(x / (2^sign_bit_pos)) % 2
+            
+            if sign_bit == 1 then
+                -- Negative number - set all higher bits to 1
+                local mask = 0
+                for bit = sign_bit_pos + 1, 255 do
+                    mask = mask + (2^bit)
+                end
+                x = x + mask
+            else
+                -- Positive number - clear all higher bits
+                local mask = (2^(sign_bit_pos + 1)) - 1
+                x = x % (mask + 1)
+            end
+        end
+        
+        table.insert(state.stack, x)
         state.pc = state.pc + 1
     end,
 
@@ -744,6 +898,27 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- PC (0x58) - Program counter
+    [0x58] = function(state)
+        -- Return current program counter (subtract 1 because it will be incremented)
+        table.insert(state.stack, state.pc - 1)
+        state.pc = state.pc + 1
+    end,
+
+    -- MSIZE (0x59) - Memory size
+    [0x59] = function(state)
+        -- Return current memory size in bytes (highest accessed position + 1)
+        local size = 0
+        -- Find the highest index that has been accessed
+        for i, _ in pairs(state.memory) do
+            if i >= size then
+                size = i + 1  -- Size is highest index + 1
+            end
+        end
+        table.insert(state.stack, size)
+        state.pc = state.pc + 1
+    end,
+
     -- JUMP
     [0x56] = function(state, bytecode)
         print("JUMP")
@@ -789,11 +964,44 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- SHL (0x1B) - Left bit shift
+    [0x1B] = function(state)
+        local shift = toNumber(table.remove(state.stack))
+        local value = toNumber(table.remove(state.stack))
+        
+        if shift >= 256 then
+            table.insert(state.stack, 0)
+        else
+            local result = value * (2 ^ shift)
+            table.insert(state.stack, result)
+        end
+        state.pc = state.pc + 1
+    end,
+
     -- SHR
     [0x1C] = function(state)
         local value = toNumber(table.remove(state.stack))
         local shift = toNumber(table.remove(state.stack))
         table.insert(state.stack, math.floor(value / (2 ^ shift)))
+        state.pc = state.pc + 1
+    end,
+
+    -- SAR (0x1D) - Arithmetic right shift with sign preservation
+    [0x1D] = function(state)
+        local shift = toNumber(table.remove(state.stack))
+        local value = toNumber(table.remove(state.stack))
+        
+        if shift >= 256 then
+            -- Check if value is negative (high bit set)
+            if value >= 2^255 then
+                table.insert(state.stack, 2^256 - 1)  -- All 1s for negative
+            else
+                table.insert(state.stack, 0)   -- All 0s for positive
+            end
+        else
+            local result = math.floor(value / (2 ^ shift))
+            table.insert(state.stack, result)
+        end
         state.pc = state.pc + 1
     end,
 
@@ -837,6 +1045,88 @@ EVM.opcodes = {
                 state.memory[dest_offset + i] = state.return_data[data_offset + i + 1] or 0
             end
         end
+        state.pc = state.pc + 1
+    end,
+
+    -- EXTCODESIZE (0x3B) - Get external contract code size
+    [0x3B] = function(state)
+        local address = table.remove(state.stack)
+        -- Convert address to string if it's a number
+        local addr_str = type(address) == "number" and string.format("0x%040X", address) or tostring(address)
+        
+        -- Get contract code from Redis
+        local code = redis.call("GET", "CODE:" .. addr_str) or ""
+        
+        -- Calculate code size in bytes (hex string length / 2)
+        local code_size = 0
+        if code and code ~= "" then
+            -- Remove 0x prefix if present
+            local hex_code = code:gsub("^0x", "")
+            code_size = math.floor(#hex_code / 2)
+        end
+        
+        table.insert(state.stack, code_size)
+        state.pc = state.pc + 1
+    end,
+
+    -- EXTCODECOPY (0x3C) - Copy external contract code to memory
+    [0x3C] = function(state)
+        local address = table.remove(state.stack)
+        local dest_offset = toNumber(table.remove(state.stack))
+        local code_offset = toNumber(table.remove(state.stack))
+        local length = toNumber(table.remove(state.stack))
+        
+        -- Convert address to string if it's a number
+        local addr_str = type(address) == "number" and string.format("0x%040X", address) or tostring(address)
+        
+        -- Get contract code from Redis
+        local code = redis.call("GET", "CODE:" .. addr_str) or ""
+        local code_bytes = hexStringToTable(code)
+        
+        -- Expand memory if necessary
+        local required_size = dest_offset + length
+        while #state.memory < required_size do
+            table.insert(state.memory, 0)
+        end
+        
+        -- Copy code bytes to memory
+        for i = 0, length - 1 do
+            local byte_val = code_bytes[code_offset + i + 1] or 0
+            state.memory[dest_offset + i] = byte_val
+        end
+        
+        state.pc = state.pc + 1
+    end,
+
+    -- EXTCODEHASH (0x3F) - Get external contract code hash
+    [0x3F] = function(state)
+        local address = table.remove(state.stack)
+        -- Convert address to string if it's a number
+        local addr_str = type(address) == "number" and string.format("0x%040X", address) or tostring(address)
+        
+        -- Check if we have a cached hash first
+        local cached_hash = redis.call("GET", "CODEHASH:" .. addr_str)
+        if cached_hash then
+            table.insert(state.stack, cached_hash)
+        else
+            -- Get contract code from Redis
+            local code = redis.call("GET", "CODE:" .. addr_str) or ""
+            
+            if code == "" then
+                -- Empty account - return 0
+                table.insert(state.stack, 0)
+            else
+                -- Calculate keccak256 hash of the code
+                local code_bytes = hexStringToTable(code)
+                local hash = keccak256(code_bytes)
+                
+                -- Cache the hash for future use
+                redis.call("SET", "CODEHASH:" .. addr_str, hash)
+                
+                table.insert(state.stack, hash)
+            end
+        end
+        
         state.pc = state.pc + 1
     end,
 

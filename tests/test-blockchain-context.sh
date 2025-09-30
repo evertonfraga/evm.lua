@@ -134,6 +134,7 @@ test_number() {
 test_timestamp() {
     local contract_addr="0x0000000000000000000000000000000000000075"
     local timestamp="1640995200"  # Jan 1, 2022 00:00:00 UTC
+    local expected_hex="0x61D4A000"  # timestamp in hex
     
     # Set timestamp in Redis
     redis-cli SET "TIMESTAMP" "$timestamp"
@@ -143,11 +144,14 @@ test_timestamp() {
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
-    if [ "$result" = "0x61D4A000" ]; then  # timestamp in hex
-        success "TIMESTAMP Test Passed: Returns block timestamp"
+    # Convert result back to decimal to verify it matches our timestamp
+    local result_decimal=$((result))
+    
+    if [ "$result_decimal" = "$timestamp" ]; then
+        success "TIMESTAMP Test Passed: Returns block timestamp ($result)"
         return 0
     else
-        fail "TIMESTAMP Test Failed" "0x61D4A000" "$result"
+        fail "TIMESTAMP Test Failed" "timestamp $timestamp (hex: $expected_hex)" "$result (decimal: $result_decimal)"
         return 1
     fi
 }
