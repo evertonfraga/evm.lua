@@ -3,12 +3,30 @@
 # Source library functions
 source ./lib.sh
 
-# Test LOG1 opcode (0xA0)
-test_log1() {
+# Test LOG0 opcode (0xA0)
+test_log0() {
     local contract_addr="0x0000000000000000000000000000000000000080"
+    # Store data in memory first, then emit LOG0
+    # Bytecode: PUSH1 0x42, PUSH1 0, MSTORE8, PUSH1 1, PUSH1 0, LOG0, PUSH1 0x42, STOP
+    redis-cli SET "$contract_addr" "60 42 60 00 53 60 01 60 00 A0 60 42 00"
+    
+    local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
+    
+    if [ "$result" = "0x42" ]; then
+        success "LOG0 Test Passed: LOG0 executed successfully"
+        return 0
+    else
+        fail "LOG0 Test Failed" "0x42" "$result"
+        return 1
+    fi
+}
+
+# Test LOG1 opcode (0xA1)
+test_log1() {
+    local contract_addr="0x0000000000000000000000000000000000000081"
     # Store data in memory first, then emit LOG1
     # Bytecode: PUSH1 0x42, PUSH1 0, MSTORE8, PUSH1 0x1234, PUSH1 1, PUSH1 0, LOG1, PUSH1 0x42, STOP
-    redis-cli SET "$contract_addr" "60 42 60 00 53 61 12 34 60 01 60 00 A0 60 42 00"
+    redis-cli SET "$contract_addr" "60 42 60 00 53 61 12 34 60 01 60 00 A1 60 42 00"
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
@@ -21,12 +39,12 @@ test_log1() {
     fi
 }
 
-# Test LOG2 opcode (0xA1)
+# Test LOG2 opcode (0xA2)
 test_log2() {
-    local contract_addr="0x0000000000000000000000000000000000000081"
+    local contract_addr="0x0000000000000000000000000000000000000082"
     # Store data in memory first, then emit LOG2
     # Bytecode: PUSH1 0x42, PUSH1 0, MSTORE8, PUSH1 0x5678, PUSH1 0x1234, PUSH1 1, PUSH1 0, LOG2, PUSH1 0x42, STOP
-    redis-cli SET "$contract_addr" "60 42 60 00 53 61 56 78 61 12 34 60 01 60 00 A1 60 42 00"
+    redis-cli SET "$contract_addr" "60 42 60 00 53 61 56 78 61 12 34 60 01 60 00 A2 60 42 00"
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
@@ -39,12 +57,12 @@ test_log2() {
     fi
 }
 
-# Test LOG3 opcode (0xA2)
+# Test LOG3 opcode (0xA3)
 test_log3() {
-    local contract_addr="0x0000000000000000000000000000000000000082"
+    local contract_addr="0x0000000000000000000000000000000000000083"
     # Store data in memory first, then emit LOG3
     # Bytecode: PUSH1 0x42, PUSH1 0, MSTORE8, PUSH1 0x9ABC, PUSH1 0x5678, PUSH1 0x1234, PUSH1 1, PUSH1 0, LOG3, PUSH1 0x42, STOP
-    redis-cli SET "$contract_addr" "60 42 60 00 53 61 9A BC 61 56 78 61 12 34 60 01 60 00 A2 60 42 00"
+    redis-cli SET "$contract_addr" "60 42 60 00 53 61 9A BC 61 56 78 61 12 34 60 01 60 00 A3 60 42 00"
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
@@ -57,12 +75,12 @@ test_log3() {
     fi
 }
 
-# Test LOG4 opcode (0xA3)
+# Test LOG4 opcode (0xA4)
 test_log4() {
-    local contract_addr="0x0000000000000000000000000000000000000083"
+    local contract_addr="0x0000000000000000000000000000000000000084"
     # Store data in memory first, then emit LOG4
     # Bytecode: PUSH1 0x42, PUSH1 0, MSTORE8, PUSH1 0xDEF0, PUSH1 0x9ABC, PUSH1 0x5678, PUSH1 0x1234, PUSH1 1, PUSH1 0, LOG4, PUSH1 0x42, STOP
-    redis-cli SET "$contract_addr" "60 42 60 00 53 61 DE F0 61 9A BC 61 56 78 61 12 34 60 01 60 00 A3 60 42 00"
+    redis-cli SET "$contract_addr" "60 42 60 00 53 61 DE F0 61 9A BC 61 56 78 61 12 34 60 01 60 00 A4 60 42 00"
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
@@ -77,10 +95,10 @@ test_log4() {
 
 # Test LOG with empty data
 test_log_empty() {
-    local contract_addr="0x0000000000000000000000000000000000000084"
-    # Emit LOG1 with no data
-    # Bytecode: PUSH1 0x1234, PUSH1 0, PUSH1 0, LOG1, PUSH1 0x42, STOP
-    redis-cli SET "$contract_addr" "61 12 34 60 00 60 00 A0 60 42 00"
+    local contract_addr="0x0000000000000000000000000000000000000085"
+    # Emit LOG0 with no data
+    # Bytecode: PUSH1 0, PUSH1 0, LOG0, PUSH1 0x42, STOP
+    redis-cli SET "$contract_addr" "60 00 60 00 A0 60 42 00"
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
@@ -95,10 +113,10 @@ test_log_empty() {
 
 # Test LOG with multiple bytes of data
 test_log_multiple_bytes() {
-    local contract_addr="0x0000000000000000000000000000000000000085"
+    local contract_addr="0x0000000000000000000000000000000000000086"
     # Store multiple bytes in memory, then emit LOG1
     # Bytecode: PUSH1 0x41, PUSH1 0, MSTORE8, PUSH1 0x42, PUSH1 1, MSTORE8, PUSH1 0x43, PUSH1 2, MSTORE8, PUSH1 0x1234, PUSH1 3, PUSH1 0, LOG1, PUSH1 0x42, STOP
-    redis-cli SET "$contract_addr" "60 41 60 00 53 60 42 60 01 53 60 43 60 02 53 61 12 34 60 03 60 00 A0 60 42 00"
+    redis-cli SET "$contract_addr" "60 41 60 00 53 60 42 60 01 53 60 43 60 02 53 61 12 34 60 03 60 00 A1 60 42 00"
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
@@ -116,9 +134,10 @@ main() {
     ensure_redis_running
     load_evm_function
 
-    local total_tests=6
+    local total_tests=7
     local passed_tests=0
 
+    test_log0 && ((passed_tests++))
     test_log1 && ((passed_tests++))
     test_log2 && ((passed_tests++))
     test_log3 && ((passed_tests++))

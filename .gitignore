@@ -1,3 +1,7 @@
 dump.rdb
 .DS_Store
 *.log
+__pycache__/
+*.pyc
+.claude/
+tests/eth-test-results.txt

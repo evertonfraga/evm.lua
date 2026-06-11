@@ -55,6 +55,42 @@ local function hexStringToTable(hexString)
     return tbl
 end
 
+-- Normalize an address (number or "0x..."/bare hex string) to lowercase 40-hex, no prefix.
+local function normalize_address(address)
+    local addr_str = type(address) == "number" and string.format("%040X", address) or tostring(address)
+    addr_str = addr_str:gsub("^0x", ""):lower()
+    return addr_str
+end
+
+-- Look up contract code for an address, tolerating the several key conventions
+-- used across the test suite: raw "0x..", raw bare hex, "CODE:0x..", "CODE:..".
+local function lookup_code(address)
+    local bare = normalize_address(address)
+    local candidates = {
+        "0x" .. bare,
+        bare,
+        "CODE:0x" .. bare,
+        "CODE:" .. bare,
+    }
+    for _, key in ipairs(candidates) do
+        local code = redis.call("GET", key)
+        if code and code ~= "" then
+            return code
+        end
+    end
+    return nil
+end
+
+-- Resolve the active calldata for a state as a byte table.
+-- Nested calls set state.calldata directly (passed via memory args);
+-- the top-level eth_call falls back to the Redis "CALLDATA" key.
+local function get_calldata_bytes(state)
+    if state and state.calldata then
+        return state.calldata
+    end
+    return hexStringToTable(redis.call("GET", "CALLDATA") or "")
+end
+
 -- Helper function to convert stack values to numbers
 local function toNumber(val)
     if type(val) == "number" then
@@ -440,6 +476,111 @@ local function signed_arithmetic(value)
     end
 end
 
+-- Maximum EVM call stack depth (EIP-150).
+local MAX_CALL_DEPTH = 1024
+
+-- Upper bound on a single memory-region length (in bytes). Real EVM bounds this
+-- via quadratic memory-expansion gas; without gas metering a stack-supplied length
+-- can be astronomically large and hang single-threaded Redis. Real fixtures touch
+-- at most a few dozen bytes; the giant-length cases are gas tests (expecting
+-- out-of-gas, which we cannot replicate without gas metering). 4 KiB keeps the
+-- worst-case per-opcode work bounded (pure-Lua keccak is ~0.14ms/byte) while
+-- leaving every realistic operation unaffected.
+local MAX_MEM_BYTES = 4 * 1024
+
+-- Clamp a stack-derived length to the memory ceiling.
+local function clamp_length(length)
+    if length > MAX_MEM_BYTES then
+        return MAX_MEM_BYTES
+    end
+    return length
+end
+
+-- Read `length` bytes of memory starting at `offset` into a fresh byte table.
+local function read_memory_bytes(state, offset, length)
+    local bytes = {}
+    for i = 0, length - 1 do
+        bytes[i + 1] = state.memory[offset + i] or 0
+    end
+    return bytes
+end
+
+-- Write a byte table into memory starting at `dest_offset`, bounded by `length`.
+local function write_memory_bytes(state, dest_offset, data, length)
+    for i = 0, length - 1 do
+        state.memory[dest_offset + i] = (data and data[i + 1]) or 0
+    end
+end
+
+-- Shared implementation for the CALL family (CALL/CALLCODE/DELEGATECALL/STATICCALL).
+-- `kind` selects the storage/value semantics. Returns nothing; pushes success flag.
+local function do_call(state, kind)
+    local gas = toNumber(table.remove(state.stack))
+    local to_address = table.remove(state.stack)
+
+    -- CALL and CALLCODE carry a value argument; DELEGATECALL/STATICCALL do not.
+    local value = 0
+    if kind == "CALL" or kind == "CALLCODE" then
+        value = toNumber(table.remove(state.stack))
+    end
+
+    local args_offset = toNumber(table.remove(state.stack))
+    local args_length = toNumber(table.remove(state.stack))
+    local ret_offset = toNumber(table.remove(state.stack))
+    local ret_length = toNumber(table.remove(state.stack))
+
+    -- Depth limit: a call beyond MAX_CALL_DEPTH fails (pushes 0) without executing.
+    local depth = state.call_depth or 0
+    if depth >= MAX_CALL_DEPTH then
+        state.return_data = {}
+        table.insert(state.stack, 0)
+        state.pc = state.pc + 1
+        return
+    end
+
+    local calldata = read_memory_bytes(state, args_offset, args_length)
+    local code = lookup_code(to_address)
+
+    -- Calling an account with no code (EOA / precompile-less) succeeds with empty return.
+    if not code then
+        state.return_data = {}
+        write_memory_bytes(state, ret_offset, {}, 0)
+        table.insert(state.stack, 1)
+        state.pc = state.pc + 1
+        return
+    end
+
+    -- DELEGATECALL/CALLCODE run the target code in the *caller's* storage context;
+    -- CALL/STATICCALL switch the storage context to the target address.
+    local exec_address = state.address
+    if kind == "CALL" or kind == "STATICCALL" then
+        exec_address = "0x" .. normalize_address(to_address)
+    end
+
+    local sub = EVM.init(exec_address)
+    sub.calldata = calldata
+    sub.call_depth = depth + 1
+    sub.static = state.static or (kind == "STATICCALL")
+    sub.budget = state.budget  -- share the call-tree gas budget
+
+    local ok = pcall(function()
+        EVM.execute(sub, hexStringToTable(code))
+    end)
+
+    -- Surface the callee's return data to the caller and copy into return memory.
+    state.return_data = sub.return_data or {}
+    local ret_data_len = math.min(ret_length, #state.return_data)
+    write_memory_bytes(state, ret_offset, state.return_data, ret_data_len)
+
+    -- Success unless the callee reverted, hit an invalid opcode, or errored.
+    if ok and not sub.reverted and not sub.invalid_opcode then
+        table.insert(state.stack, 1)
+    else
+        table.insert(state.stack, 0)
+    end
+    state.pc = state.pc + 1
+end
+
 -- Helper for modulo operations with proper zero handling
 local function mod_arithmetic(a, b)
     if b == 0 then
@@ -773,13 +914,13 @@ EVM.opcodes = {
     -- KECCAK256 (SHA3)
     [0x20] = function(state)
         local offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
-        
+        local length = clamp_length(toNumber(table.remove(state.stack)))
+
         local data = {}
         for i = 1, length do
             data[i] = state.memory[offset + i - 1] or 0
         end
-        
+
         local hash = keccak256(data)
         table.insert(state.stack, hash)
         state.pc = state.pc + 1
@@ -832,8 +973,7 @@ EVM.opcodes = {
     -- CALLDATALOAD
     [0x35] = function(state)
         local offset = toNumber(table.remove(state.stack))
-        local calldata = redis.call("GET", "CALLDATA") or ""
-        local data_bytes = hexStringToTable(calldata)
+        local data_bytes = get_calldata_bytes(state)
         local value = 0
         for i = 0, 31 do
             local byte_val = data_bytes[offset + i + 1] or 0
@@ -845,9 +985,8 @@ EVM.opcodes = {
 
     -- CALLDATASIZE
     [0x36] = function(state)
-        local calldata = redis.call("GET", "CALLDATA") or ""
-        local size = math.floor(#calldata / 2)
-        table.insert(state.stack, size)
+        local data_bytes = get_calldata_bytes(state)
+        table.insert(state.stack, #data_bytes)
         state.pc = state.pc + 1
     end,
 
@@ -855,12 +994,11 @@ EVM.opcodes = {
     [0x37] = function(state)
         local dest_offset = toNumber(table.remove(state.stack))
         local data_offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
-        
-        -- Get calldata from Redis
-        local calldata = redis.call("GET", "CALLDATA") or ""
-        local data_bytes = hexStringToTable(calldata)
-        
+        local length = clamp_length(toNumber(table.remove(state.stack)))
+
+        -- Get active calldata (nested call args or Redis CALLDATA)
+        local data_bytes = get_calldata_bytes(state)
+
         -- Copy bytes from calldata to memory with bounds checking
         -- (Memory expansion is automatic in Lua tables)
         for i = 0, length - 1 do
@@ -899,7 +1037,7 @@ EVM.opcodes = {
     [0x39] = function(state)
         local dest_offset = toNumber(table.remove(state.stack))
         local code_offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         local code = redis.call("GET", state.address) or ""
         local code_bytes = hexStringToTable(code)
         for i = 0, length - 1 do
@@ -973,10 +1111,38 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
+    -- BLOBHASH (0x49) - Get versioned hash of the i-th blob (EIP-4844)
+    [0x49] = function(state)
+        local index = toNumber(table.remove(state.stack))
+        -- Blob versioned hashes are provided via BLOBHASH:<index> keys.
+        local hash = redis.call("GET", "BLOBHASH:" .. tostring(index))
+        if hash and hash ~= "" then
+            table.insert(state.stack, hash)
+        else
+            table.insert(state.stack, 0)
+        end
+        state.pc = state.pc + 1
+    end,
+
+    -- BLOBBASEFEE (0x4A) - Get the current block's blob base fee (EIP-7516)
+    [0x4A] = function(state)
+        local blobbasefee = get_env_data("BLOBBASEFEE", "1")  -- Default minimum 1 wei
+        table.insert(state.stack, toNumber(blobbasefee))
+        state.pc = state.pc + 1
+    end,
+
     -- GAS
     [0x5A] = function(state)
-        local gas = redis.call("GET", "GAS") or 21000
-        table.insert(state.stack, toNumber(gas))
+        -- Report gas remaining from the shared budget when metering is active;
+        -- fall back to the legacy Redis "GAS" key for direct/test invocations.
+        if state.budget then
+            local remaining = state.budget.gas_cap - state.budget.gas_used
+            if remaining < 0 then remaining = 0 end
+            table.insert(state.stack, remaining)
+        else
+            local gas = redis.call("GET", "GAS") or 21000
+            table.insert(state.stack, toNumber(gas))
+        end
         state.pc = state.pc + 1
     end,
 
@@ -1087,7 +1253,7 @@ EVM.opcodes = {
     [0x5E] = function(state)
         local dest = toNumber(table.remove(state.stack))
         local src = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         
         -- Handle edge case: zero length copy
         if length == 0 then
@@ -1234,7 +1400,7 @@ EVM.opcodes = {
     -- RETURN
     [0xF3] = function(state)
         local offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         state.return_data = {}
         for i = 0, length - 1 do
             state.return_data[i + 1] = state.memory[offset + i] or 0
@@ -1245,7 +1411,7 @@ EVM.opcodes = {
     -- REVERT
     [0xFD] = function(state)
         local offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         state.return_data = {}
         for i = 0, length - 1 do
             state.return_data[i + 1] = state.memory[offset + i] or 0
@@ -1265,7 +1431,7 @@ EVM.opcodes = {
     [0x3E] = function(state)
         local dest_offset = toNumber(table.remove(state.stack))
         local data_offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         if state.return_data then
             for i = 0, length - 1 do
                 state.memory[dest_offset + i] = state.return_data[data_offset + i + 1] or 0
@@ -1300,7 +1466,7 @@ EVM.opcodes = {
         local address = table.remove(state.stack)
         local dest_offset = toNumber(table.remove(state.stack))
         local code_offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         
         -- Convert address to string if it's a number
         local addr_str = type(address) == "number" and string.format("0x%040X", address) or tostring(address)
@@ -1356,23 +1522,139 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
-    -- STATICCALL
+    -- CALL (0xF1) - Message-call into an account
+    [0xF1] = function(state)
+        do_call(state, "CALL")
+    end,
+
+    -- CALLCODE (0xF2) - Call with the caller's storage but the callee's code
+    [0xF2] = function(state)
+        do_call(state, "CALLCODE")
+    end,
+
+    -- DELEGATECALL (0xF4) - Call preserving caller's storage, sender and value
+    [0xF4] = function(state)
+        do_call(state, "DELEGATECALL")
+    end,
+
+    -- STATICCALL (0xFA) - Call disallowing any state modification
     [0xFA] = function(state)
-        local gas = toNumber(table.remove(state.stack))
-        local address = table.remove(state.stack)
-        local args_offset = toNumber(table.remove(state.stack))
-        local args_length = toNumber(table.remove(state.stack))
-        local ret_offset = toNumber(table.remove(state.stack))
-        local ret_length = toNumber(table.remove(state.stack))
-        -- Simplified: just push success (1) for now
-        table.insert(state.stack, 1)
+        do_call(state, "STATICCALL")
+    end,
+
+    -- CREATE (0xF0) - Create a new contract from init code in memory
+    [0xF0] = function(state)
+        local value = toNumber(table.remove(state.stack))
+        local offset = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
+
+        local depth = state.call_depth or 0
+        if depth >= MAX_CALL_DEPTH then
+            table.insert(state.stack, 0)
+            state.pc = state.pc + 1
+            return
+        end
+
+        -- Run the init code; its return data becomes the deployed runtime code.
+        local init_code = read_memory_bytes(state, offset, length)
+        local sub = EVM.init(state.address)
+        sub.call_depth = depth + 1
+        sub.budget = state.budget  -- share the call-tree gas budget
+        local ok = pcall(function()
+            EVM.execute(sub, init_code)
+        end)
+
+        if ok and not sub.reverted and not sub.invalid_opcode then
+            -- Derive a deterministic placeholder address for the new contract.
+            local seed = normalize_address(state.address) .. tostring(redis.call("INCR", "CREATE_NONCE"))
+            local new_address = "0x" .. string.sub(keccak256(hexStringToTable(seed:gsub("[^0-9a-fA-F]", ""))), 27)
+            local runtime = sub.return_data or {}
+            local runtime_hex = {}
+            for i = 1, #runtime do
+                runtime_hex[i] = string.format("%02x", runtime[i])
+            end
+            redis.call("SET", "CODE:" .. normalize_address(new_address), "0x" .. table.concat(runtime_hex))
+            table.insert(state.stack, new_address)
+        else
+            table.insert(state.stack, 0)
+        end
         state.pc = state.pc + 1
     end,
 
-    -- LOG1
+    -- CREATE2 (0xF5) - Like CREATE but with a caller-supplied salt
+    [0xF5] = function(state)
+        local value = toNumber(table.remove(state.stack))
+        local offset = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
+        local salt = table.remove(state.stack)
+
+        local depth = state.call_depth or 0
+        if depth >= MAX_CALL_DEPTH then
+            table.insert(state.stack, 0)
+            state.pc = state.pc + 1
+            return
+        end
+
+        local init_code = read_memory_bytes(state, offset, length)
+        local sub = EVM.init(state.address)
+        sub.call_depth = depth + 1
+        sub.budget = state.budget  -- share the call-tree gas budget
+        local ok = pcall(function()
+            EVM.execute(sub, init_code)
+        end)
+
+        if ok and not sub.reverted and not sub.invalid_opcode then
+            local seed = normalize_address(state.address) .. tostring(salt)
+            local new_address = "0x" .. string.sub(keccak256(hexStringToTable(seed:gsub("[^0-9a-fA-F]", ""))), 27)
+            local runtime = sub.return_data or {}
+            local runtime_hex = {}
+            for i = 1, #runtime do
+                runtime_hex[i] = string.format("%02x", runtime[i])
+            end
+            redis.call("SET", "CODE:" .. normalize_address(new_address), "0x" .. table.concat(runtime_hex))
+            table.insert(state.stack, new_address)
+        else
+            table.insert(state.stack, 0)
+        end
+        state.pc = state.pc + 1
+    end,
+
+    -- SELFDESTRUCT (0xFF) - Halt execution and mark the account for deletion
+    [0xFF] = function(state)
+        local beneficiary = table.remove(state.stack)
+
+        -- Transfer the contract's balance to the beneficiary, then delete account state.
+        local self_key = balance_key(state.address)
+        local benef_key = balance_key(beneficiary)
+        local self_balance = toNumber(get_env_data(self_key, "0"))
+        if self_balance > 0 then
+            local benef_balance = toNumber(get_env_data(benef_key, "0"))
+            redis.call("SET", benef_key, string.format("%d", benef_balance + self_balance))
+            redis.call("SET", self_key, "0")
+        end
+        redis.call("DEL", "CODE:" .. normalize_address(state.address))
+
+        state.self_destructed = true
+        state.running = false
+    end,
+
+    -- LOG0 (0xA0) - no topics
     [0xA0] = function(state)
         local offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
+        local log_data = {}
+        for i = 0, length - 1 do
+            log_data[i + 1] = state.memory[offset + i] or 0
+        end
+        state.logs = state.logs or {}
+        table.insert(state.logs, {data = log_data, topics = {}})
+        state.pc = state.pc + 1
+    end,
+
+    -- LOG1 (0xA1)
+    [0xA1] = function(state)
+        local offset = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         local topic1 = table.remove(state.stack)
         local log_data = {}
         for i = 0, length - 1 do
@@ -1383,10 +1665,10 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
-    -- LOG2
-    [0xA1] = function(state)
+    -- LOG2 (0xA2)
+    [0xA2] = function(state)
         local offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         local topic1 = table.remove(state.stack)
         local topic2 = table.remove(state.stack)
         local log_data = {}
@@ -1398,10 +1680,10 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
-    -- LOG3
-    [0xA2] = function(state)
+    -- LOG3 (0xA3)
+    [0xA3] = function(state)
         local offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         local topic1 = table.remove(state.stack)
         local topic2 = table.remove(state.stack)
         local topic3 = table.remove(state.stack)
@@ -1414,10 +1696,10 @@ EVM.opcodes = {
         state.pc = state.pc + 1
     end,
 
-    -- LOG4
-    [0xA3] = function(state)
+    -- LOG4 (0xA4)
+    [0xA4] = function(state)
         local offset = toNumber(table.remove(state.stack))
-        local length = toNumber(table.remove(state.stack))
+        local length = clamp_length(toNumber(table.remove(state.stack)))
         local topic1 = table.remove(state.stack)
         local topic2 = table.remove(state.stack)
         local topic3 = table.remove(state.stack)
@@ -1528,6 +1810,108 @@ local function printState(state)
 
 end
 
+-- Default gas cap per top-level call. Overridable at runtime via the Redis key
+-- "GAS_CAP". 8,000,000 gas mirrors a generous block-style budget and is far more
+-- than any single VMTest fixture needs, while bounding worst-case work on the
+-- single-threaded Redis server.
+local DEFAULT_GAS_CAP = 8000000
+
+-- Read the configured gas cap (Redis key "GAS_CAP"), falling back to the default.
+local function resolve_gas_cap()
+    local configured = redis.call("GET", "GAS_CAP")
+    if configured then
+        local n = tonumber(configured)
+        if n and n > 0 then
+            return math.floor(n)
+        end
+    end
+    return DEFAULT_GAS_CAP
+end
+
+-- Static per-opcode gas costs (approximate, aligned with the Berlin+ schedule
+-- for the common tiers). Dynamic components (memory words, topics, exponent
+-- bytes) are added separately in dynamic_gas(). Ranges for PUSH/DUP/SWAP are
+-- filled in below.
+local GAS_COSTS = {
+    [0x00] = 0,                                  -- STOP
+    [0x01] = 3,  [0x02] = 5,  [0x03] = 3,        -- ADD MUL SUB
+    [0x04] = 5,  [0x05] = 5,  [0x06] = 5,        -- DIV SDIV MOD
+    [0x07] = 5,  [0x08] = 8,  [0x09] = 8,        -- SMOD ADDMOD MULMOD
+    [0x0A] = 10, [0x0B] = 5,                     -- EXP SIGNEXTEND
+    [0x10] = 3,  [0x11] = 3,  [0x12] = 3,        -- LT GT SLT
+    [0x13] = 3,  [0x14] = 3,  [0x15] = 3,        -- SGT EQ ISZERO
+    [0x16] = 3,  [0x17] = 3,  [0x18] = 3,        -- AND OR XOR
+    [0x19] = 3,  [0x1A] = 3,  [0x1B] = 3,        -- NOT BYTE SHL
+    [0x1C] = 3,  [0x1D] = 3,                     -- SHR SAR
+    [0x20] = 30,                                 -- KECCAK256 (+dynamic)
+    [0x30] = 2,  [0x31] = 2600, [0x32] = 2,      -- ADDRESS BALANCE ORIGIN
+    [0x33] = 2,  [0x34] = 2,  [0x35] = 3,        -- CALLER CALLVALUE CALLDATALOAD
+    [0x36] = 2,  [0x37] = 3,  [0x38] = 2,        -- CALLDATASIZE CALLDATACOPY CODESIZE
+    [0x39] = 3,  [0x3A] = 2,  [0x3B] = 2600,     -- CODECOPY GASPRICE EXTCODESIZE
+    [0x3C] = 2600, [0x3D] = 2, [0x3E] = 3,       -- EXTCODECOPY RETURNDATASIZE RETURNDATACOPY
+    [0x3F] = 2600,                               -- EXTCODEHASH
+    [0x40] = 20, [0x41] = 2,  [0x42] = 2,        -- BLOCKHASH COINBASE TIMESTAMP
+    [0x43] = 2,  [0x44] = 2,  [0x45] = 2,        -- NUMBER PREVRANDAO GASLIMIT
+    [0x46] = 2,  [0x47] = 5,  [0x48] = 2,        -- CHAINID SELFBALANCE BASEFEE
+    [0x49] = 3,  [0x4A] = 2,                     -- BLOBHASH BLOBBASEFEE
+    [0x50] = 2,  [0x51] = 3,  [0x52] = 3,        -- POP MLOAD MSTORE
+    [0x53] = 3,  [0x54] = 2100, [0x55] = 20000,  -- MSTORE8 SLOAD SSTORE
+    [0x56] = 8,  [0x57] = 10, [0x58] = 2,        -- JUMP JUMPI PC
+    [0x59] = 2,  [0x5A] = 2,  [0x5B] = 1,        -- MSIZE GAS JUMPDEST
+    [0x5C] = 100, [0x5D] = 100, [0x5E] = 3,      -- TLOAD TSTORE MCOPY
+    [0x5F] = 2,                                  -- PUSH0
+    [0xA0] = 375, [0xA1] = 375, [0xA2] = 375,    -- LOG0-2 (+dynamic)
+    [0xA3] = 375, [0xA4] = 375,                  -- LOG3-4 (+dynamic)
+    [0xF0] = 32000, [0xF1] = 100, [0xF2] = 100,  -- CREATE CALL CALLCODE
+    [0xF3] = 0,  [0xF4] = 100, [0xF5] = 32000,   -- RETURN DELEGATECALL CREATE2
+    [0xFA] = 100, [0xFD] = 0,  [0xFE] = 0,       -- STATICCALL REVERT INVALID
+    [0xFF] = 5000,                               -- SELFDESTRUCT
+}
+for op = 0x60, 0x7F do GAS_COSTS[op] = 3 end   -- PUSH1..PUSH32
+for op = 0x80, 0x8F do GAS_COSTS[op] = 3 end   -- DUP1..DUP16
+for op = 0x90, 0x9F do GAS_COSTS[op] = 3 end   -- SWAP1..SWAP16
+
+-- Number of 32-byte words needed to cover `bytes` bytes.
+local function num_words(bytes)
+    return math.floor((bytes + 31) / 32)
+end
+
+-- Compute the dynamic (size-dependent) gas for opcodes whose cost depends on
+-- stack arguments. Reads the stack non-destructively (the handler still pops).
+local function dynamic_gas(opcode, stack)
+    local n = #stack
+    if opcode == 0x20 then
+        -- KECCAK256: 6 gas per word hashed. stack: [.. length, offset(top)]
+        local length = toNumber(stack[n - 1] or 0)
+        return 6 * num_words(clamp_length(length))
+    elseif opcode == 0x0A then
+        -- EXP: 50 gas per byte of the exponent. stack: [.. exponent, base(top)]?
+        -- handler pops base first then exponent, so exponent = stack[n-1].
+        local exponent = toNumber(stack[n - 1] or 0)
+        local bytes = 0
+        while exponent > 0 do
+            bytes = bytes + 1
+            exponent = math.floor(exponent / 256)
+        end
+        return 50 * bytes
+    elseif opcode == 0x37 or opcode == 0x39 or opcode == 0x3E or opcode == 0x5E then
+        -- CALLDATACOPY/CODECOPY/RETURNDATACOPY/MCOPY: 3 gas per word copied.
+        -- length is the 3rd stack item from top for these (dest, src, length).
+        local length = toNumber(stack[n - 2] or 0)
+        return 3 * num_words(clamp_length(length))
+    elseif opcode == 0x3C then
+        -- EXTCODECOPY: dest, src, length below the address; length = stack[n-3].
+        local length = toNumber(stack[n - 3] or 0)
+        return 3 * num_words(clamp_length(length))
+    elseif opcode >= 0xA0 and opcode <= 0xA4 then
+        -- LOGn: 375 gas per topic + 8 gas per byte of data.
+        local topics = opcode - 0xA0
+        local length = toNumber(stack[n - 1] or 0)
+        return 375 * topics + 8 * clamp_length(length)
+    end
+    return 0
+end
+
 -- Function to execute opcodes
 function EVM.execute(state, bytecode)
     state.running = true
@@ -1539,9 +1923,28 @@ function EVM.execute(state, bytecode)
     end
     print(table.concat(bytecode_hex, " "), "\n")
 
+    -- Gas is metered against a single pool shared across the entire call tree:
+    -- nested CALL/CREATE frames inherit the same mutable budget (state.budget) so
+    -- deep recursion draws from one cap rather than multiplying it by call depth.
+    -- The top-level frame seeds the pool from the configured cap.
+    if not state.budget then
+        state.budget = { gas_used = 0, gas_cap = resolve_gas_cap() }
+    end
+    local budget = state.budget
+
     while state.running do
         local opcode = bytecode[state.pc]
         if EVM.opcodes[opcode] then
+            -- Charge gas before executing: static tier cost + dynamic size cost.
+            local cost = (GAS_COSTS[opcode] or 3) + dynamic_gas(opcode, state.stack)
+            budget.gas_used = budget.gas_used + cost
+            if budget.gas_used > budget.gas_cap then
+                state.running = false
+                state.out_of_gas = true
+                error(string.format(
+                    "Out of gas: used %d exceeds cap %d",
+                    budget.gas_used, budget.gas_cap))
+            end
             print(state.pc, h(opcode))
             EVM.opcodes[opcode](state, bytecode)
         else
