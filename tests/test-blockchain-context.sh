@@ -134,6 +134,7 @@ test_number() {
 test_timestamp() {
     local contract_addr="0x0000000000000000000000000000000000000075"
     local timestamp="1640995200"  # Jan 1, 2022 00:00:00 UTC
+    local expected_hex="0x61D4A000"  # timestamp in hex
     
     # Set timestamp in Redis
     redis-cli SET "TIMESTAMP" "$timestamp"
@@ -143,33 +144,39 @@ test_timestamp() {
     
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
     
-    if [ "$result" = "0x61D4A000" ]; then  # timestamp in hex
-        success "TIMESTAMP Test Passed: Returns block timestamp"
+    # Convert result back to decimal to verify it matches our timestamp
+    local result_decimal=$((result))
+    
+    if [ "$result_decimal" = "$timestamp" ]; then
+        success "TIMESTAMP Test Passed: Returns block timestamp ($result)"
         return 0
     else
-        fail "TIMESTAMP Test Failed" "0x61D4A000" "$result"
+        fail "TIMESTAMP Test Failed" "timestamp $timestamp (hex: $expected_hex)" "$result (decimal: $result_decimal)"
         return 1
     fi
 }
 
 # Test GAS opcode (0x5A)
+# With gas metering enabled, GAS returns gas *remaining* (cap minus consumed),
+# matching real EVM semantics. We set a known cap and assert GAS reports the cap
+# minus the gas already charged for the GAS instruction itself (cost 2).
 test_gas() {
     local contract_addr="0x0000000000000000000000000000000000000076"
-    local gas_limit="21000"
-    
-    # Set gas in Redis
-    redis-cli SET "GAS" "$gas_limit"
-    
+
+    # Configure a known cap; GAS is the first (and only) metered op before STOP.
+    redis-cli SET "GAS_CAP" "21000"
+
     # Bytecode: GAS, STOP
     redis-cli SET "$contract_addr" "5A 00"
-    
+
     local result=$(redis-cli FCALL eth_call 1 "$contract_addr")
-    
-    if [ "$result" = "0x5208" ]; then  # 21000 in hex
-        success "GAS Test Passed: Returns available gas"
+    redis-cli DEL "GAS_CAP" > /dev/null
+
+    if [ "$result" = "0x5206" ]; then  # 21000 - 2 (GAS opcode cost)
+        success "GAS Test Passed: Returns gas remaining ($result)"
         return 0
     else
-        fail "GAS Test Failed" "0x5208" "$result"
+        fail "GAS Test Failed" "0x5206" "$result"
         return 1
     fi
 }

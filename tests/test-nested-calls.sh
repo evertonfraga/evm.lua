@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# Test nested contract calls
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+echo "Nested Calls Test..."
+setup_redis
+
+# Contract C: Just returns 42
+CONTRACT_C="0x1111111111111111111111111111111111111111"
+# Bytecode: PUSH1 0x42, STOP
+BYTECODE_C="0x604200"
+redis-cli SET "CODE:${CONTRACT_C:2}" "$BYTECODE_C"
+
+# Contract B: Calls Contract C
+CONTRACT_B="0x2222222222222222222222222222222222222222"
+# Bytecode: PUSH1 0x00, PUSH1 0x00, PUSH1 0x00, PUSH1 0x00, PUSH1 0x00, PUSH20 CONTRACT_C, PUSH2 0x1000, CALL, STOP
+BYTECODE_B="0x60006000600060006000731111111111111111111111111111111111111111611000F100"
+redis-cli SET "CODE:${CONTRACT_B:2}" "$BYTECODE_B"
+
+# Contract A: Calls Contract B
+CONTRACT_A="0x3333333333333333333333333333333333333333"
+# Bytecode: PUSH1 0x00, PUSH1 0x00, PUSH1 0x00, PUSH1 0x00, PUSH1 0x00, PUSH20 CONTRACT_B, PUSH2 0x1000, CALL, STOP
+BYTECODE_A="0x60006000600060006000732222222222222222222222222222222222222222611000F100"
+redis-cli SET "CODE:${CONTRACT_A:2}" "$BYTECODE_A"
+redis-cli SET "$CONTRACT_A" "$BYTECODE_A"
+
+redis-cli SET "CALLER" "0x0000000000000000000000000000000000000000"
+redis-cli SET "CALLVALUE" "0"
+redis-cli SET "CALLDATA" "0x"
+
+echo "Calling Contract A (which calls B which calls C)..."
+RESULT=$(redis-cli FCALL eth_call 1 "$CONTRACT_A")
+echo "Result: $RESULT"
+
+if [ "$RESULT" = "0x01" ]; then
+    echo "✓ 3-level nested call succeeded"
+else
+    echo "✗ 3-level nested call failed - expected 0x01, got $RESULT"
+fi

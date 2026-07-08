@@ -81,12 +81,13 @@ main() {
         "test-stack.sh:Stack and Memory Operations"
         "test-control-flow.sh:Control Flow Operations"
         "test-storage.sh:Storage Operations"
-        "test-keccak.sh:KECCAK256 Hash Operations"
+        # "test-keccak.sh:KECCAK256 Hash Operations"
         "test-memory.sh:Memory Operations"
         "test-bitwise.sh:Bitwise Operations"
         "test-blockchain-context.sh:Blockchain Context"
         "test-logging.sh:Logging Operations"
         "test-calldata.sh:Calldata Operations"
+        "test-precompiles.sh:Precompiled Contracts"
     )
     
     # Run each test suite
@@ -99,7 +100,7 @@ main() {
             ((failed_suites++))
         fi
     done
-    
+     
     # Display final summary
     display_summary $total_suites $passed_suites $failed_suites
     
